@@ -19,7 +19,7 @@ except Exception:
 
 
 st.set_page_config(
-    page_title="Gyártási Diagnosztika V3",
+    page_title="Gyártási Diagnosztika V4",
     page_icon="🏭",
     layout="wide"
 )
@@ -350,7 +350,7 @@ def build_pdf_report(df: pd.DataFrame, pair: pd.DataFrame, recs: List[Tuple[str,
     profit = df["Becsült_profit"].sum()
 
     story = []
-    story.append(P("Gyártási Diagnosztika V3 – vezetői riport", title))
+    story.append(P("Gyártási Diagnosztika V4 – vezetői riport", title))
     story.append(P("Excelből készült automatikus ember–gép, OEE light és profitdiagnosztika.", body))
     story.append(Spacer(1, 0.25 * cm))
 
@@ -429,7 +429,7 @@ def build_pdf_report(df: pd.DataFrame, pair: pd.DataFrame, recs: List[Tuple[str,
 
 
     story.append(Spacer(1, 0.25 * cm))
-    story.append(P("Megjegyzés: a V3 riport döntéstámogató becslés. A pontos okok feltárásához a helyi folyamatokat és adatminőséget is érdemes ellenőrizni.", body))
+    story.append(P("Megjegyzés: a V4 riport döntéstámogató becslés. A pontos okok feltárásához a helyi folyamatokat és adatminőséget is érdemes ellenőrizni.", body))
 
     doc.build(story)
     return buffer.getvalue()
@@ -517,6 +517,138 @@ def compare_assignment_scenarios(pair: pd.DataFrame, current_assignment: pd.Data
     return pd.DataFrame(rows)
 
 
+
+def product_machine_priority(df: pd.DataFrame) -> pd.DataFrame:
+    """Termék-gép prioritási tábla: melyik termék melyik gépen hozza a legtöbb értéket."""
+    if df.empty:
+        return pd.DataFrame()
+
+    out = df.groupby(["Termék", "Gép"], as_index=False).agg(
+        Gyártott_db=("Gyártott_db", "sum"),
+        Jó_db=("Jó_db", "sum"),
+        Selejt_db=("Selejt_db", "sum"),
+        Átlag_OEE=("OEE_light_%", "mean"),
+        Átlag_teljesítmény=("Teljesítmény_%", "mean"),
+        Profit=("Becsült_profit", "sum"),
+        Sorok=("Gyártott_db", "count")
+    )
+    out["Selejt_%"] = np.where(out["Gyártott_db"] > 0, out["Selejt_db"] / out["Gyártott_db"] * 100, 0)
+    out["Profit/db"] = np.where(out["Jó_db"] > 0, out["Profit"] / out["Jó_db"], 0)
+
+    # V4 prioritás: profit/db + OEE + alacsony selejt
+    profit = out["Profit/db"]
+    if profit.max() != profit.min():
+        profit_score = (profit - profit.min()) / (profit.max() - profit.min()) * 55
+    else:
+        profit_score = 27.5
+
+    oee_score = out["Átlag_OEE"].clip(0, 100) / 100 * 30
+    quality_score = (100 - out["Selejt_%"].clip(0, 20) * 5).clip(0, 100) / 100 * 15
+    out["Termék_gép_pont"] = (profit_score + oee_score + quality_score).round(1)
+    return out.sort_values("Termék_gép_pont", ascending=False)
+
+
+def build_production_plan(
+    df: pd.DataFrame,
+    demand: Dict[str, int],
+    max_hours_per_machine: float = 8.0,
+    unavailable_machines: List[str] = None
+) -> pd.DataFrame:
+    """Egyszerű greedy gyártási terv.
+    A legjobb termék-gép párosoktól indul, figyeli a gépenkénti órakeretet.
+    """
+    unavailable_machines = unavailable_machines or []
+    priority = product_machine_priority(df)
+    if priority.empty:
+        return pd.DataFrame()
+
+    priority = priority[~priority["Gép"].isin(unavailable_machines)].copy()
+    if priority.empty:
+        return pd.DataFrame()
+
+    machine_hours = {m: 0.0 for m in priority["Gép"].unique()}
+    rows = []
+
+    for product, qty_needed in demand.items():
+        remaining = int(qty_needed or 0)
+        if remaining <= 0:
+            continue
+
+        candidates = priority[priority["Termék"] == product].sort_values("Termék_gép_pont", ascending=False)
+        if candidates.empty:
+            rows.append({
+                "Termék": product,
+                "Gép": "Nincs adat",
+                "Tervezett_db": 0,
+                "Becsült_óra": 0,
+                "Becsült_profit": 0,
+                "Megjegyzés": "Nincs múltbeli adat ehhez a termékhez"
+            })
+            continue
+
+        for _, cand in candidates.iterrows():
+            if remaining <= 0:
+                break
+
+            machine = cand["Gép"]
+            avg_per_hour = max(float(cand["Átlag_teljesítmény"]) / 100 * float(df[df["Gép"] == machine]["Kapacitás_db_óra"].mean()), 1)
+            free_hours = max_hours_per_machine - machine_hours.get(machine, 0.0)
+            if free_hours <= 0:
+                continue
+
+            possible_qty = int(avg_per_hour * free_hours)
+            planned_qty = min(remaining, possible_qty)
+            used_hours = planned_qty / avg_per_hour if avg_per_hour else 0
+            machine_hours[machine] = machine_hours.get(machine, 0.0) + used_hours
+            remaining -= planned_qty
+
+            rows.append({
+                "Termék": product,
+                "Gép": machine,
+                "Tervezett_db": planned_qty,
+                "Becsült_óra": round(used_hours, 2),
+                "Becsült_profit": round(planned_qty * float(cand["Profit/db"]), 0),
+                "Megjegyzés": f"Prioritási pont: {cand['Termék_gép_pont']:.0f}"
+            })
+
+        if remaining > 0:
+            rows.append({
+                "Termék": product,
+                "Gép": "Kapacitáshiány",
+                "Tervezett_db": remaining,
+                "Becsült_óra": 0,
+                "Becsült_profit": 0,
+                "Megjegyzés": "Nem fér bele a megadott gépórákba"
+            })
+
+    return pd.DataFrame(rows)
+
+
+def generate_plan_insights(plan_df: pd.DataFrame) -> List[Tuple[str, str]]:
+    recs = []
+    if plan_df is None or plan_df.empty:
+        return [("warning", "Nincs még gyártási terv. Adj meg rendelési mennyiségeket.")]
+
+    total_profit = plan_df["Becsült_profit"].sum() if "Becsült_profit" in plan_df.columns else 0
+    total_qty = plan_df["Tervezett_db"].sum() if "Tervezett_db" in plan_df.columns else 0
+    recs.append(("success", f"A javasolt terv {fmt_num(total_qty)} db gyártást és kb. {fmt_huf(total_profit)} becsült profitot mutat."))
+
+    bottleneck = plan_df[plan_df["Gép"].eq("Kapacitáshiány")]
+    if not bottleneck.empty:
+        missing = bottleneck["Tervezett_db"].sum()
+        recs.append(("danger", f"Kapacitáshiány látszik: {fmt_num(missing)} db nem fér bele a megadott gépórákba."))
+
+    top_machine = plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])].groupby("Gép", as_index=False).agg(
+        Óra=("Becsült_óra", "sum"),
+        Profit=("Becsült_profit", "sum")
+    )
+    if not top_machine.empty:
+        row = top_machine.sort_values("Profit", ascending=False).iloc[0]
+        recs.append(("warning", f"A tervben a(z) {row['Gép']} hozza a legnagyobb profitot ({fmt_huf(row['Profit'])}), ezért ezt érdemes védeni kiesés ellen."))
+
+    return recs
+
+
 def render_recommendations(recs: List[Tuple[str, str]]):
     if not recs:
         st.info("Még nincs elég adat erős ajánláshoz.")
@@ -528,7 +660,7 @@ def render_recommendations(recs: List[Tuple[str, str]]):
 # ------------------------------------------------------------
 # Header
 # ------------------------------------------------------------
-st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V3</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V4</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="subtitle">Excelből működő ember–gép hatékonyság, OEE light, profitdiagnosztika és beosztási ajánlórendszer KKV-knak.</div>',
     unsafe_allow_html=True
@@ -621,7 +753,8 @@ tabs = st.tabs([
     "4. Gépdiagnosztika",
     "5. Termék / profit",
     "6. Ajánlórendszer",
-    "7. Adatellenőrzés"
+    "7. Gyártási terv szimulátor",
+    "8. Adatellenőrzés"
 ])
 
 
@@ -757,7 +890,7 @@ with tabs[4]:
 with tabs[5]:
     st.subheader("Ajánlórendszer – Holnap kit hova tegyek?")
 
-    st.caption("V2 alaplogika: dolgozó–gép kompatibilitás alapján javasol beosztást. Már kezel dolgozó kiesést, gépkiesést és egyszeres dolgozóhasználatot.")
+    st.caption("V4 alaplogika: dolgozó–gép kompatibilitás alapján javasol beosztást. Már kezel dolgozó kiesést, gépkiesést és egyszeres dolgozóhasználatot.")
 
     st.markdown("### Alap javasolt beosztás")
     assignment = recommended_assignment(pair)
@@ -809,13 +942,88 @@ with tabs[5]:
 
     st.markdown("### Következő fejlesztési szint")
     st.info(
-        "V3-ban ide jöhet rendelésállomány, műszakórák, termékprioritás, dolgozói jogosultságok és profitmaximalizáló optimalizálás."
+        "V4-ben már van alap rendelés/szimulátor. V5-ben jöhet, műszakórák, termékprioritás, dolgozói jogosultságok és profitmaximalizáló optimalizálás."
     )
+
+
+# ------------------------------------------------------------
+# 7. Gyártási terv szimulátor
+# ------------------------------------------------------------
+with tabs[6]:
+    st.subheader("Gyártási terv szimulátor")
+    st.caption("V4: add meg, melyik termékből mennyit kellene gyártani, az app pedig javasol géptervet múltbeli teljesítmény és profit alapján.")
+
+    st.markdown("### Rendelési igények")
+    product_list = sorted(filtered["Termék"].dropna().unique())
+    demand = {}
+
+    cols = st.columns(min(4, max(1, len(product_list))))
+    for i, product in enumerate(product_list):
+        with cols[i % len(cols)]:
+            demand[product] = st.number_input(
+                f"{product} igényelt db",
+                min_value=0,
+                value=1000 if i == 0 else 500,
+                step=100,
+                key=f"demand_{product}"
+            )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        max_hours = st.slider("Max. gépóra / gép", 1.0, 24.0, 8.0, step=0.5)
+    with c2:
+        plan_unavailable_machines = st.multiselect(
+            "Kieső gépek a tervből",
+            sorted(filtered["Gép"].dropna().unique()),
+            default=[]
+        )
+
+    plan_df = build_production_plan(
+        filtered,
+        demand=demand,
+        max_hours_per_machine=max_hours,
+        unavailable_machines=plan_unavailable_machines
+    )
+
+    st.markdown("### Javasolt gyártási terv")
+    if plan_df.empty:
+        st.warning("Nincs elég adat gyártási terv készítéséhez.")
+    else:
+        st.dataframe(plan_df, use_container_width=True, hide_index=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            fig = px.bar(
+                plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])],
+                x="Gép",
+                y="Tervezett_db",
+                color="Termék",
+                title="Tervezett darabszám gépenként"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        with c2:
+            fig = px.bar(
+                plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])],
+                x="Gép",
+                y="Becsült_profit",
+                color="Termék",
+                title="Becsült profit gépenként"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("### Terv megállapítások")
+    render_recommendations(generate_plan_insights(plan_df))
+
+    st.markdown("### Termék–gép prioritási tábla")
+    priority = product_machine_priority(filtered)
+    st.dataframe(priority.head(30), use_container_width=True, hide_index=True)
+
+
 
 # ------------------------------------------------------------
 # 7. Adatellenőrzés
 # ------------------------------------------------------------
-with tabs[6]:
+with tabs[7]:
     st.subheader("Adatellenőrzés")
     st.markdown("### Feldolgozott adatok")
     st.dataframe(filtered.head(500), use_container_width=True, hide_index=True)
