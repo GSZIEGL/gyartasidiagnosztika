@@ -19,7 +19,7 @@ except Exception:
 
 
 st.set_page_config(
-    page_title="Gyártási Diagnosztika V5",
+    page_title="Gyártási Diagnosztika V6",
     page_icon="🏭",
     layout="wide"
 )
@@ -115,6 +115,7 @@ REQUIRED_PROD_COLS = [
 
 REQUIRED_MACHINE_COLS = ["Gép", "Kapacitás_db_óra", "Óradíj", "Kritikus_gép"]
 REQUIRED_PRODUCT_COLS = ["Termék", "Eladási_ár", "Anyagköltség"]
+OPTIONAL_ORDER_COLS = ["Rendelés_ID", "Vevő", "Termék", "Rendelt_db", "Határidő", "Prioritás"]
 
 
 def fmt_num(x, digits=0):
@@ -350,7 +351,7 @@ def build_pdf_report(df: pd.DataFrame, pair: pd.DataFrame, recs: List[Tuple[str,
     profit = df["Becsült_profit"].sum()
 
     story = []
-    story.append(P("Gyártási Diagnosztika V5 – vezetői riport", title))
+    story.append(P("Gyártási Diagnosztika V6 – vezetői riport", title))
     story.append(P("Excelből készült automatikus ember–gép, OEE light és profitdiagnosztika.", body))
     story.append(Spacer(1, 0.25 * cm))
 
@@ -429,7 +430,7 @@ def build_pdf_report(df: pd.DataFrame, pair: pd.DataFrame, recs: List[Tuple[str,
 
 
     story.append(Spacer(1, 0.25 * cm))
-    story.append(P("Megjegyzés: a V5 riport döntéstámogató becslés. A pontos okok feltárásához a helyi folyamatokat és adatminőséget is érdemes ellenőrizni.", body))
+    story.append(P("Megjegyzés: a V6 riport döntéstámogató becslés. A pontos okok feltárásához a helyi folyamatokat és adatminőséget is érdemes ellenőrizni.", body))
 
     doc.build(story)
     return buffer.getvalue()
@@ -516,6 +517,90 @@ def compare_assignment_scenarios(pair: pd.DataFrame, current_assignment: pd.Data
     ]
     return pd.DataFrame(rows)
 
+
+
+
+def normalize_orders(orders_raw: pd.DataFrame) -> pd.DataFrame:
+    """Opcionális Megrendelesek munkalap feldolgozása."""
+    if orders_raw is None or orders_raw.empty:
+        return pd.DataFrame(columns=OPTIONAL_ORDER_COLS)
+
+    orders = orders_raw.copy()
+    missing = [c for c in OPTIONAL_ORDER_COLS if c not in orders.columns]
+    if missing:
+        # Nem állítjuk meg az appot, csak üres rendelésállományként kezeljük.
+        return pd.DataFrame(columns=OPTIONAL_ORDER_COLS)
+
+    orders["Rendelt_db"] = pd.to_numeric(orders["Rendelt_db"], errors="coerce").fillna(0).astype(int)
+    orders["Határidő"] = pd.to_datetime(orders["Határidő"], errors="coerce")
+    orders["Prioritás"] = pd.to_numeric(orders["Prioritás"], errors="coerce").fillna(3).astype(int)
+    return orders
+
+
+def demand_from_orders(orders_df: pd.DataFrame) -> Dict[str, int]:
+    """Rendelésállományból termékenkénti igény."""
+    if orders_df is None or orders_df.empty:
+        return {}
+    d = orders_df.groupby("Termék")["Rendelt_db"].sum().to_dict()
+    return {str(k): int(v) for k, v in d.items()}
+
+
+def order_priority_view(orders_df: pd.DataFrame) -> pd.DataFrame:
+    """Rendelések priorizált nézete."""
+    if orders_df is None or orders_df.empty:
+        return pd.DataFrame()
+    out = orders_df.copy()
+    today = pd.Timestamp.today().normalize()
+    out["Napok_határidőig"] = (out["Határidő"] - today).dt.days
+    out["Sürgősségi_pont"] = (
+        (6 - out["Prioritás"].clip(1, 5)) * 20
+        + np.where(out["Napok_határidőig"] <= 3, 40, 0)
+        + np.where(out["Napok_határidőig"] <= 7, 20, 0)
+    )
+    return out.sort_values(["Sürgősségi_pont", "Határidő"], ascending=[False, True])
+
+
+def build_order_fulfillment(plan_df: pd.DataFrame, orders_df: pd.DataFrame) -> pd.DataFrame:
+    """Megmutatja, hogy a javasolt gyártási terv mennyire fedezi a rendelésállományt."""
+    if orders_df is None or orders_df.empty:
+        return pd.DataFrame()
+
+    demand = orders_df.groupby("Termék", as_index=False).agg(Rendelt_db=("Rendelt_db", "sum"))
+    if plan_df is None or plan_df.empty:
+        demand["Tervezett_db"] = 0
+    else:
+        planned = plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])].groupby("Termék", as_index=False).agg(
+            Tervezett_db=("Tervezett_db", "sum")
+        )
+        demand = demand.merge(planned, on="Termék", how="left")
+        demand["Tervezett_db"] = demand["Tervezett_db"].fillna(0)
+
+    demand["Hiány_db"] = (demand["Rendelt_db"] - demand["Tervezett_db"]).clip(lower=0)
+    demand["Teljesítés_%"] = np.where(demand["Rendelt_db"] > 0, demand["Tervezett_db"] / demand["Rendelt_db"] * 100, 0).clip(upper=100).round(1)
+    return demand.sort_values("Teljesítés_%")
+
+
+def generate_order_insights(orders_df: pd.DataFrame, fulfillment_df: pd.DataFrame) -> List[Tuple[str, str]]:
+    if orders_df is None or orders_df.empty:
+        return [("warning", "Nincs Megrendelesek munkalap, ezért a terv kézi darabszámokból indul.")]
+
+    recs = []
+    total_orders = int(orders_df["Rendelt_db"].sum())
+    recs.append(("success", f"A feltöltött rendelésállomány összesen {fmt_num(total_orders)} db gyártási igényt tartalmaz."))
+
+    urgent = order_priority_view(orders_df)
+    if not urgent.empty:
+        top = urgent.iloc[0]
+        recs.append(("warning", f"Legsürgősebb rendelés: {top['Rendelés_ID']} / {top['Vevő']} / {top['Termék']} / {fmt_num(top['Rendelt_db'])} db."))
+
+    if fulfillment_df is not None and not fulfillment_df.empty:
+        worst = fulfillment_df.sort_values("Teljesítés_%").iloc[0]
+        if worst["Teljesítés_%"] < 100:
+            recs.append(("danger", f"Rendelésteljesítési hiány: {worst['Termék']} termékből {fmt_num(worst['Hiány_db'])} db még nem fér bele a tervbe."))
+        else:
+            recs.append(("success", "A jelenlegi terv termékszinten fedezi a rendelésállományt."))
+
+    return recs
 
 
 def product_machine_priority(df: pd.DataFrame) -> pd.DataFrame:
@@ -717,7 +802,7 @@ def build_scenario_summary(plan_df: pd.DataFrame, worker_plan: pd.DataFrame, cap
 
     total_qty = plan_df["Tervezett_db"].sum() if "Tervezett_db" in plan_df.columns else 0
     total_profit = plan_df["Becsült_profit"].sum() if "Becsült_profit" in plan_df.columns else 0
-    recs.append(("success", f"A V5 terv {fmt_num(total_qty)} db gyártást és kb. {fmt_huf(total_profit)} becsült profitot mutat."))
+    recs.append(("success", f"A V6 terv {fmt_num(total_qty)} db gyártást és kb. {fmt_huf(total_profit)} becsült profitot mutat."))
 
     shortage = plan_df[plan_df["Gép"].eq("Kapacitáshiány")]
     if not shortage.empty:
@@ -739,7 +824,7 @@ def build_scenario_summary(plan_df: pd.DataFrame, worker_plan: pd.DataFrame, cap
     return recs
 
 
-def build_excel_report(df: pd.DataFrame, pair: pd.DataFrame, assignment: pd.DataFrame, plan_df: pd.DataFrame = None, worker_plan: pd.DataFrame = None) -> bytes:
+def build_excel_report(df: pd.DataFrame, pair: pd.DataFrame, assignment: pd.DataFrame, plan_df: pd.DataFrame = None, worker_plan: pd.DataFrame = None, orders_df: pd.DataFrame = None, fulfillment_df: pd.DataFrame = None) -> bytes:
     """Letölthető Excel riport több munkalappal."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -753,6 +838,10 @@ def build_excel_report(df: pd.DataFrame, pair: pd.DataFrame, assignment: pd.Data
             plan_df.to_excel(writer, sheet_name="Gyartasi_terv", index=False)
         if worker_plan is not None and not worker_plan.empty:
             worker_plan.to_excel(writer, sheet_name="Dolgozoi_terv", index=False)
+        if orders_df is not None and not orders_df.empty:
+            orders_df.to_excel(writer, sheet_name="Megrendelesek", index=False)
+        if fulfillment_df is not None and not fulfillment_df.empty:
+            fulfillment_df.to_excel(writer, sheet_name="Rendeles_teljesites", index=False)
     return output.getvalue()
 
 
@@ -792,7 +881,7 @@ def render_recommendations(recs: List[Tuple[str, str]]):
 # ------------------------------------------------------------
 # Header
 # ------------------------------------------------------------
-st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V5</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V6</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="subtitle">Excelből működő ember–gép hatékonyság, OEE light, profitdiagnosztika és beosztási ajánlórendszer KKV-knak.</div>',
     unsafe_allow_html=True
@@ -825,11 +914,19 @@ try:
     machines_raw = find_sheet(sheets, ["Gepek", "Gépek"])
     products_raw = find_sheet(sheets, ["Termekek", "Termékek"])
 
+    # Opcionális: Megrendelesek / Megrendelések munkalap
+    orders_raw = None
+    for possible_order_sheet in ["Megrendelesek", "Megrendelések", "Rendelesek", "Rendelések"]:
+        if possible_order_sheet in sheets:
+            orders_raw = sheets[possible_order_sheet]
+            break
+
     validate_columns(prod_raw, REQUIRED_PROD_COLS, "Termeles")
     validate_columns(machines_raw, REQUIRED_MACHINE_COLS, "Gepek")
     validate_columns(products_raw, REQUIRED_PRODUCT_COLS, "Termekek")
 
     df = prepare_data(prod_raw, machines_raw, products_raw)
+    orders_df = normalize_orders(orders_raw) if orders_raw is not None else pd.DataFrame(columns=OPTIONAL_ORDER_COLS)
 except Exception as exc:
     st.error(f"Adatbetöltési hiba: {exc}")
     st.stop()
@@ -875,6 +972,14 @@ matrix, pair = build_worker_machine_matrix(filtered)
 recs = generate_recommendations(filtered, pair)
 assignment = recommended_assignment(pair)
 
+# V6: ha van rendelésállomány, a vezetői áttekintő exportja is tartalmazzon tervet és beosztást.
+orders_demand_global = demand_from_orders(orders_df) if "orders_df" in globals() else {}
+if not orders_demand_global:
+    orders_demand_global = {p: 0 for p in sorted(filtered["Termék"].dropna().unique())}
+default_plan_df = build_production_plan(filtered, demand=orders_demand_global, max_hours_per_machine=8.0, unavailable_machines=[])
+default_worker_plan = build_worker_machine_plan(default_plan_df, pair, unavailable_workers=[])
+default_fulfillment_df = build_order_fulfillment(default_plan_df, orders_df) if "orders_df" in globals() else pd.DataFrame()
+
 
 # ------------------------------------------------------------
 # Tabok
@@ -887,7 +992,8 @@ tabs = st.tabs([
     "5. Termék / profit",
     "6. Ajánlórendszer",
     "7. Gyártási terv + beosztás",
-    "8. Adatellenőrzés"
+    "8. Megrendelések",
+    "9. Adatellenőrzés"
 ])
 
 
@@ -913,7 +1019,7 @@ with tabs[0]:
     render_recommendations(recs)
 
     st.markdown("### Excel export")
-    overview_excel = build_excel_report(filtered, pair, assignment)
+    overview_excel = build_excel_report(filtered, pair, assignment, default_plan_df, default_worker_plan, orders_df, default_fulfillment_df)
     st.download_button(
         "⬇️ Elemzési Excel riport letöltése",
         data=overview_excel,
@@ -1094,19 +1200,29 @@ with tabs[5]:
 # ------------------------------------------------------------
 with tabs[6]:
     st.subheader("Gyártási terv szimulátor + dolgozói beosztás")
-    st.caption("V5: rendelési igény + gépóra + kieső gépek/dolgozók alapján javasol gyártási és dolgozói tervet.")
+    st.caption("V6: rendelésállomány + gépóra + kieső gépek/dolgozók alapján javasol gyártási és dolgozói tervet.")
+
+    if orders_df is not None and not orders_df.empty:
+        st.success("Megrendelések munkalap felismerve: a tervezés rendelésállományból is indítható.")
+        with st.expander("Rendelésállomány áttekintése", expanded=False):
+            st.dataframe(order_priority_view(orders_df), use_container_width=True, hide_index=True)
+    else:
+        st.info("Nincs Megrendelesek munkalap. A terv továbbra is kézi darabszámokból indítható.")
 
     st.markdown("### Rendelési igények")
     product_list = sorted(filtered["Termék"].dropna().unique())
     demand = {}
 
+    order_demand = demand_from_orders(orders_df) if orders_df is not None and not orders_df.empty else {}
+
     cols = st.columns(min(4, max(1, len(product_list))))
     for i, product in enumerate(product_list):
         with cols[i % len(cols)]:
+            default_value = int(order_demand.get(product, 1000 if i == 0 else 500))
             demand[product] = st.number_input(
                 f"{product} igényelt db",
                 min_value=0,
-                value=1000 if i == 0 else 500,
+                value=default_value,
                 step=100,
                 key=f"demand_{product}"
             )
@@ -1150,6 +1266,14 @@ with tabs[6]:
     else:
         st.dataframe(plan_df, use_container_width=True, hide_index=True)
 
+    if orders_df is not None and not orders_df.empty:
+        st.markdown("### Rendelésteljesítési ellenőrzés")
+        fulfillment_df = build_order_fulfillment(plan_df, orders_df)
+        st.dataframe(fulfillment_df, use_container_width=True, hide_index=True)
+        render_recommendations(generate_order_insights(orders_df, fulfillment_df))
+    else:
+        fulfillment_df = pd.DataFrame()
+
     st.markdown("### 2. Javasolt dolgozói beosztás a tervhez")
     if worker_plan.empty:
         st.warning("Nincs elég dolgozó–gép adat dolgozói terv készítéséhez.")
@@ -1186,13 +1310,13 @@ with tabs[6]:
             )
             st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("### 4. V5 terv megállapítások")
+    st.markdown("### 4. V6 terv megállapítások")
     render_recommendations(build_scenario_summary(plan_df, worker_plan, capacity_df))
 
     st.markdown("### 5. Export")
-    excel_bytes = build_excel_report(filtered, pair, assignment, plan_df, worker_plan)
+    excel_bytes = build_excel_report(filtered, pair, assignment, plan_df, worker_plan, orders_df, fulfillment_df)
     st.download_button(
-        "⬇️ V5 Excel riport letöltése",
+        "⬇️ V6 Excel riport letöltése",
         data=excel_bytes,
         file_name="gyartasi_diagnosztika_v5_riport.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1205,10 +1329,39 @@ with tabs[6]:
 
 
 
+
+# ------------------------------------------------------------
+# 8. Megrendelések
+# ------------------------------------------------------------
+with tabs[7]:
+    st.subheader("Megrendelésállomány")
+    st.caption("Opcionális munkalap: Megrendelesek. Ha feltöltöd, a gyártási terv automatikusan ebből indul.")
+
+    if orders_df is None or orders_df.empty:
+        st.info("Nincs feltöltött Megrendelesek munkalap.")
+        st.markdown("### Várt oszlopok")
+        st.write(OPTIONAL_ORDER_COLS)
+    else:
+        st.markdown("### Prioritási sorrend")
+        priority_orders = order_priority_view(orders_df)
+        st.dataframe(priority_orders, use_container_width=True, hide_index=True)
+
+        st.markdown("### Termékenkénti rendelési igény")
+        order_summary = orders_df.groupby("Termék", as_index=False).agg(
+            Rendelt_db=("Rendelt_db", "sum"),
+            Rendelések_száma=("Rendelés_ID", "count"),
+            Legkorábbi_határidő=("Határidő", "min")
+        )
+        st.dataframe(order_summary, use_container_width=True, hide_index=True)
+
+        fig = px.bar(order_summary, x="Termék", y="Rendelt_db", color="Termék", title="Rendelési igény termékenként")
+        st.plotly_chart(fig, use_container_width=True)
+
+
 # ------------------------------------------------------------
 # 7. Adatellenőrzés
 # ------------------------------------------------------------
-with tabs[7]:
+with tabs[8]:
     st.subheader("Adatellenőrzés")
     st.markdown("### Feldolgozott adatok")
     st.dataframe(filtered.head(500), use_container_width=True, hide_index=True)
