@@ -19,7 +19,7 @@ except Exception:
 
 
 st.set_page_config(
-    page_title="Gyártási Diagnosztika V4",
+    page_title="Gyártási Diagnosztika V5",
     page_icon="🏭",
     layout="wide"
 )
@@ -350,7 +350,7 @@ def build_pdf_report(df: pd.DataFrame, pair: pd.DataFrame, recs: List[Tuple[str,
     profit = df["Becsült_profit"].sum()
 
     story = []
-    story.append(P("Gyártási Diagnosztika V4 – vezetői riport", title))
+    story.append(P("Gyártási Diagnosztika V5 – vezetői riport", title))
     story.append(P("Excelből készült automatikus ember–gép, OEE light és profitdiagnosztika.", body))
     story.append(Spacer(1, 0.25 * cm))
 
@@ -429,7 +429,7 @@ def build_pdf_report(df: pd.DataFrame, pair: pd.DataFrame, recs: List[Tuple[str,
 
 
     story.append(Spacer(1, 0.25 * cm))
-    story.append(P("Megjegyzés: a V4 riport döntéstámogató becslés. A pontos okok feltárásához a helyi folyamatokat és adatminőséget is érdemes ellenőrizni.", body))
+    story.append(P("Megjegyzés: a V5 riport döntéstámogató becslés. A pontos okok feltárásához a helyi folyamatokat és adatminőséget is érdemes ellenőrizni.", body))
 
     doc.build(story)
     return buffer.getvalue()
@@ -624,6 +624,138 @@ def build_production_plan(
     return pd.DataFrame(rows)
 
 
+
+def build_worker_machine_plan(plan_df: pd.DataFrame, pair: pd.DataFrame, unavailable_workers: List[str] = None) -> pd.DataFrame:
+    """A gyártási terv gépeihez dolgozót ajánl.
+    Egyszerű greedy: gépenként a legjobb elérhető dolgozót választja.
+    """
+    unavailable_workers = unavailable_workers or []
+    if plan_df is None or plan_df.empty or pair is None or pair.empty:
+        return pd.DataFrame(columns=["Gép", "Termék", "Tervezett_db", "Ajánlott_dolgozó", "Dolgozó-gép_pont", "Megjegyzés"])
+
+    active_plan = plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])].copy()
+    if active_plan.empty:
+        return pd.DataFrame(columns=["Gép", "Termék", "Tervezett_db", "Ajánlott_dolgozó", "Dolgozó-gép_pont", "Megjegyzés"])
+
+    rows = []
+    used_workers = set()
+
+    for _, task in active_plan.sort_values(["Becsült_profit", "Tervezett_db"], ascending=False).iterrows():
+        machine = task["Gép"]
+        candidates = pair[
+            (pair["Gép"] == machine)
+            & (~pair["Dolgozó"].isin(unavailable_workers))
+            & (~pair["Dolgozó"].isin(used_workers))
+        ].sort_values("Kompatibilitási_pont", ascending=False)
+
+        if candidates.empty:
+            # fallback: allow repeated worker if no unused candidate
+            candidates = pair[
+                (pair["Gép"] == machine)
+                & (~pair["Dolgozó"].isin(unavailable_workers))
+            ].sort_values("Kompatibilitási_pont", ascending=False)
+
+        if candidates.empty:
+            rows.append({
+                "Gép": machine,
+                "Termék": task["Termék"],
+                "Tervezett_db": task["Tervezett_db"],
+                "Ajánlott_dolgozó": "Nincs elérhető adat",
+                "Dolgozó-gép_pont": 0,
+                "Megjegyzés": "Nincs múltbeli dolgozó-gép adat"
+            })
+            continue
+
+        best = candidates.iloc[0]
+        used_workers.add(best["Dolgozó"])
+
+        rows.append({
+            "Gép": machine,
+            "Termék": task["Termék"],
+            "Tervezett_db": task["Tervezett_db"],
+            "Ajánlott_dolgozó": best["Dolgozó"],
+            "Dolgozó-gép_pont": round(best["Kompatibilitási_pont"], 1),
+            "Megjegyzés": f"Várható teljesítmény: {best['Átlag_teljesítmény']:.1f}%, selejt: {best['Selejt_%']:.1f}%"
+        })
+
+    return pd.DataFrame(rows).sort_values(["Gép", "Termék"])
+
+
+def build_capacity_gap(plan_df: pd.DataFrame, max_hours_per_machine: float) -> pd.DataFrame:
+    """Gépenkénti kihasználtság / kapacitáshiány V5."""
+    if plan_df is None or plan_df.empty:
+        return pd.DataFrame(columns=["Gép", "Tervezett_óra", "Max_óra", "Kihasználtság_%", "Státusz"])
+
+    active = plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])].copy()
+    if active.empty:
+        return pd.DataFrame(columns=["Gép", "Tervezett_óra", "Max_óra", "Kihasználtság_%", "Státusz"])
+
+    out = active.groupby("Gép", as_index=False).agg(
+        Tervezett_óra=("Becsült_óra", "sum"),
+        Becsült_profit=("Becsült_profit", "sum")
+    )
+    out["Max_óra"] = max_hours_per_machine
+    out["Kihasználtság_%"] = np.where(out["Max_óra"] > 0, out["Tervezett_óra"] / out["Max_óra"] * 100, 0).round(1)
+
+    def status(x):
+        if x >= 95:
+            return "Szűk keresztmetszet / teljesen lekötött"
+        if x >= 75:
+            return "Magas kihasználtság"
+        if x >= 40:
+            return "Kiegyensúlyozott"
+        return "Alulterhelt / van szabad kapacitás"
+
+    out["Státusz"] = out["Kihasználtság_%"].apply(status)
+    return out.sort_values("Kihasználtság_%", ascending=False)
+
+
+def build_scenario_summary(plan_df: pd.DataFrame, worker_plan: pd.DataFrame, capacity_df: pd.DataFrame) -> List[Tuple[str, str]]:
+    recs = []
+    if plan_df is None or plan_df.empty:
+        return [("warning", "Nincs gyártási terv a szcenárióhoz.")]
+
+    total_qty = plan_df["Tervezett_db"].sum() if "Tervezett_db" in plan_df.columns else 0
+    total_profit = plan_df["Becsült_profit"].sum() if "Becsült_profit" in plan_df.columns else 0
+    recs.append(("success", f"A V5 terv {fmt_num(total_qty)} db gyártást és kb. {fmt_huf(total_profit)} becsült profitot mutat."))
+
+    shortage = plan_df[plan_df["Gép"].eq("Kapacitáshiány")]
+    if not shortage.empty:
+        recs.append(("danger", f"Kapacitáshiány: {fmt_num(shortage['Tervezett_db'].sum())} db nem fér bele. Növeld a gépórát, vagy csökkentsd a kieső gépeket."))
+
+    if capacity_df is not None and not capacity_df.empty:
+        bottleneck = capacity_df.iloc[0]
+        recs.append(("warning", f"Szűk keresztmetszet jelölt: {bottleneck['Gép']} ({bottleneck['Kihasználtság_%']:.1f}% kihasználtság)."))
+
+        low = capacity_df[capacity_df["Kihasználtság_%"] < 40]
+        if not low.empty:
+            recs.append(("success", f"Van szabad kapacitás: {', '.join(low['Gép'].astype(str).tolist()[:3])}."))
+
+    if worker_plan is not None and not worker_plan.empty:
+        weak = worker_plan[worker_plan["Dolgozó-gép_pont"] < 55]
+        if not weak.empty:
+            recs.append(("warning", f"{len(weak)} beosztási pont gyengébb kompatibilitású. Itt képzés vagy másik dolgozó megfontolandó."))
+
+    return recs
+
+
+def build_excel_report(df: pd.DataFrame, pair: pd.DataFrame, assignment: pd.DataFrame, plan_df: pd.DataFrame = None, worker_plan: pd.DataFrame = None) -> bytes:
+    """Letölthető Excel riport több munkalappal."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        aggregate_metrics(df, ["Műszak"]).to_excel(writer, sheet_name="Muszakok", index=False)
+        aggregate_metrics(df, ["Gép"]).to_excel(writer, sheet_name="Gepek", index=False)
+        aggregate_metrics(df, ["Dolgozó"]).to_excel(writer, sheet_name="Dolgozok", index=False)
+        aggregate_metrics(df, ["Termék"]).to_excel(writer, sheet_name="Termekek", index=False)
+        pair.sort_values("Kompatibilitási_pont", ascending=False).to_excel(writer, sheet_name="Dolgozo_gep_parok", index=False)
+        assignment.to_excel(writer, sheet_name="Javasolt_beosztas", index=False)
+        if plan_df is not None and not plan_df.empty:
+            plan_df.to_excel(writer, sheet_name="Gyartasi_terv", index=False)
+        if worker_plan is not None and not worker_plan.empty:
+            worker_plan.to_excel(writer, sheet_name="Dolgozoi_terv", index=False)
+    return output.getvalue()
+
+
 def generate_plan_insights(plan_df: pd.DataFrame) -> List[Tuple[str, str]]:
     recs = []
     if plan_df is None or plan_df.empty:
@@ -660,7 +792,7 @@ def render_recommendations(recs: List[Tuple[str, str]]):
 # ------------------------------------------------------------
 # Header
 # ------------------------------------------------------------
-st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V4</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V5</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="subtitle">Excelből működő ember–gép hatékonyság, OEE light, profitdiagnosztika és beosztási ajánlórendszer KKV-knak.</div>',
     unsafe_allow_html=True
@@ -741,6 +873,7 @@ avg_oee = filtered["OEE_light_%"].mean()
 profit = filtered["Becsült_profit"].sum()
 matrix, pair = build_worker_machine_matrix(filtered)
 recs = generate_recommendations(filtered, pair)
+assignment = recommended_assignment(pair)
 
 
 # ------------------------------------------------------------
@@ -753,7 +886,7 @@ tabs = st.tabs([
     "4. Gépdiagnosztika",
     "5. Termék / profit",
     "6. Ajánlórendszer",
-    "7. Gyártási terv szimulátor",
+    "7. Gyártási terv + beosztás",
     "8. Adatellenőrzés"
 ])
 
@@ -778,6 +911,16 @@ with tabs[0]:
 
     st.markdown("### Automatikus vezetői megállapítások")
     render_recommendations(recs)
+
+    st.markdown("### Excel export")
+    overview_excel = build_excel_report(filtered, pair, assignment)
+    st.download_button(
+        "⬇️ Elemzési Excel riport letöltése",
+        data=overview_excel,
+        file_name="gyartasi_diagnosztika_elemzesi_riport.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
 
     st.markdown("### PDF export")
     if st.button("Vezetői PDF riport elkészítése", use_container_width=True):
@@ -890,7 +1033,7 @@ with tabs[4]:
 with tabs[5]:
     st.subheader("Ajánlórendszer – Holnap kit hova tegyek?")
 
-    st.caption("V4 alaplogika: dolgozó–gép kompatibilitás alapján javasol beosztást. Már kezel dolgozó kiesést, gépkiesést és egyszeres dolgozóhasználatot.")
+    st.caption("V5 alaplogika: dolgozó–gép kompatibilitás alapján javasol beosztást. Már kezel dolgozó kiesést, gépkiesést és egyszeres dolgozóhasználatot.")
 
     st.markdown("### Alap javasolt beosztás")
     assignment = recommended_assignment(pair)
@@ -947,11 +1090,11 @@ with tabs[5]:
 
 
 # ------------------------------------------------------------
-# 7. Gyártási terv szimulátor
+# 7. Gyártási terv + beosztás
 # ------------------------------------------------------------
 with tabs[6]:
-    st.subheader("Gyártási terv szimulátor")
-    st.caption("V4: add meg, melyik termékből mennyit kellene gyártani, az app pedig javasol géptervet múltbeli teljesítmény és profit alapján.")
+    st.subheader("Gyártási terv szimulátor + dolgozói beosztás")
+    st.caption("V5: rendelési igény + gépóra + kieső gépek/dolgozók alapján javasol gyártási és dolgozói tervet.")
 
     st.markdown("### Rendelési igények")
     product_list = sorted(filtered["Termék"].dropna().unique())
@@ -968,14 +1111,22 @@ with tabs[6]:
                 key=f"demand_{product}"
             )
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         max_hours = st.slider("Max. gépóra / gép", 1.0, 24.0, 8.0, step=0.5)
     with c2:
         plan_unavailable_machines = st.multiselect(
             "Kieső gépek a tervből",
             sorted(filtered["Gép"].dropna().unique()),
-            default=[]
+            default=[],
+            key="plan_unavailable_machines_v5"
+        )
+    with c3:
+        plan_unavailable_workers = st.multiselect(
+            "Kieső dolgozók a tervből",
+            sorted(filtered["Dolgozó"].dropna().unique()),
+            default=[],
+            key="plan_unavailable_workers_v5"
         )
 
     plan_df = build_production_plan(
@@ -985,34 +1136,68 @@ with tabs[6]:
         unavailable_machines=plan_unavailable_machines
     )
 
-    st.markdown("### Javasolt gyártási terv")
+    worker_plan = build_worker_machine_plan(
+        plan_df,
+        pair,
+        unavailable_workers=plan_unavailable_workers
+    )
+
+    capacity_df = build_capacity_gap(plan_df, max_hours)
+
+    st.markdown("### 1. Javasolt gyártási terv")
     if plan_df.empty:
         st.warning("Nincs elég adat gyártási terv készítéséhez.")
     else:
         st.dataframe(plan_df, use_container_width=True, hide_index=True)
 
-        c1, c2 = st.columns(2)
-        with c1:
+    st.markdown("### 2. Javasolt dolgozói beosztás a tervhez")
+    if worker_plan.empty:
+        st.warning("Nincs elég dolgozó–gép adat dolgozói terv készítéséhez.")
+    else:
+        st.dataframe(worker_plan, use_container_width=True, hide_index=True)
+
+    st.markdown("### 3. Kapacitás / szűk keresztmetszet")
+    if capacity_df.empty:
+        st.info("Nincs kapacitásadat.")
+    else:
+        st.dataframe(capacity_df, use_container_width=True, hide_index=True)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        active_plan = plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])] if not plan_df.empty else pd.DataFrame()
+        if not active_plan.empty:
             fig = px.bar(
-                plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])],
+                active_plan,
                 x="Gép",
                 y="Tervezett_db",
                 color="Termék",
                 title="Tervezett darabszám gépenként"
             )
             st.plotly_chart(fig, use_container_width=True)
-        with c2:
+
+    with c2:
+        if not capacity_df.empty:
             fig = px.bar(
-                plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])],
+                capacity_df,
                 x="Gép",
-                y="Becsült_profit",
-                color="Termék",
-                title="Becsült profit gépenként"
+                y="Kihasználtság_%",
+                color="Státusz",
+                title="Gépkapacitás kihasználtság"
             )
             st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("### Terv megállapítások")
-    render_recommendations(generate_plan_insights(plan_df))
+    st.markdown("### 4. V5 terv megállapítások")
+    render_recommendations(build_scenario_summary(plan_df, worker_plan, capacity_df))
+
+    st.markdown("### 5. Export")
+    excel_bytes = build_excel_report(filtered, pair, assignment, plan_df, worker_plan)
+    st.download_button(
+        "⬇️ V5 Excel riport letöltése",
+        data=excel_bytes,
+        file_name="gyartasi_diagnosztika_v5_riport.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
 
     st.markdown("### Termék–gép prioritási tábla")
     priority = product_machine_priority(filtered)
