@@ -175,13 +175,14 @@ def prepare_data(prod: pd.DataFrame, machines: pd.DataFrame, products: pd.DataFr
     df["Munkaóra"] = 1.0
     df["Jó_db"] = (df["Gyártott_db"] - df["Selejt_db"]).clip(lower=0)
     df["Selejt_%"] = np.where(df["Gyártott_db"] > 0, df["Selejt_db"] / df["Gyártott_db"] * 100, 0)
-    df["Állásidő_%"] = (df["Állásidő_perc"] / 60 * 100).clip(upper=100)
+    df["Állásidő_%"] = np.minimum(df["Állásidő_perc"] / 60 * 100, 100)
     df["Elérhetőség_%"] = (100 - df["Állásidő_%"]).clip(lower=0)
     df["Teljesítmény_%"] = np.where(
         df["Kapacitás_db_óra"] > 0,
         df["Gyártott_db"] / df["Kapacitás_db_óra"] * 100,
         0
-    ).clip(upper=140)
+    )
+    df["Teljesítmény_%"] = np.minimum(df["Teljesítmény_%"], 140)
     df["Minőség_%"] = np.where(df["Gyártott_db"] > 0, df["Jó_db"] / df["Gyártott_db"] * 100, 0)
     df["OEE_light_%"] = df["Elérhetőség_%"] * df["Teljesítmény_%"] * df["Minőség_%"] / 10000
 
