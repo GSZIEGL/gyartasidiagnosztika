@@ -19,7 +19,7 @@ except Exception:
 
 
 st.set_page_config(
-    page_title="Gyártási Diagnosztika V7.1",
+    page_title="Gyártási Diagnosztika V7.2",
     page_icon="🏭",
     layout="wide"
 )
@@ -388,7 +388,7 @@ def build_pdf_report(
     profit = df["Becsült_profit"].sum()
 
     story = []
-    story.append(P("Gyártási Diagnosztika V7.1 – teljes vezetői riport", title))
+    story.append(P("Gyártási Diagnosztika V7.2 – teljes vezetői riport", title))
     story.append(P("Ember-gép diagnosztika, rendelésállomány, gyártási terv, dolgozói beosztás és kapacitáselemzés.", body))
     story.append(Spacer(1, 0.2 * cm))
 
@@ -639,7 +639,7 @@ def build_order_level_plan(
     hours_per_machine_day: float = 8.0,
     unavailable_machines: List[str] = None
 ) -> pd.DataFrame:
-    """V7.1: rendelésalapú gyártási terv.
+    """V7.2: rendelésalapú gyártási terv.
 
     A Tervezett_db nem önálló becslés: az Igényelt_db-ből indul,
     majd a tervezési horizont, a gépórák, a gépenkénti kapacitás és a
@@ -771,7 +771,7 @@ def build_order_level_plan(
 
 
 def build_order_fulfillment_v7(plan_df: pd.DataFrame, orders_df: pd.DataFrame = None, manual_demand: Dict[str, int] = None) -> pd.DataFrame:
-    """Rendelés/igény teljesítés termékszinten, V7.1 logikával."""
+    """Rendelés/igény teljesítés termékszinten, V7.2 logikával."""
     if plan_df is None or plan_df.empty:
         return pd.DataFrame()
 
@@ -837,7 +837,7 @@ def generate_plan_insights_v7(plan_df: pd.DataFrame, fulfillment_df: pd.DataFram
     active = plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])].copy()
     total_planned = active["Tervezett_db"].sum() if not active.empty else 0
     total_profit = active["Becsült_profit"].sum() if not active.empty else 0
-    recs.append(("success", f"A V7.1 terv {fmt_num(total_planned)} db gyártást és kb. {fmt_huf(total_profit)} becsült profitot mutat."))
+    recs.append(("success", f"A V7.2 terv {fmt_num(total_planned)} db gyártást és kb. {fmt_huf(total_profit)} becsült profitot mutat."))
 
     if fulfillment_df is not None and not fulfillment_df.empty:
         shortage = fulfillment_df["Hiány_db"].sum()
@@ -1102,7 +1102,7 @@ def render_recommendations(recs: List[Tuple[str, str]]):
 # ------------------------------------------------------------
 # Header
 # ------------------------------------------------------------
-st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V7.1</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V7.2</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="subtitle">Excelből működő ember–gép hatékonyság, OEE light, profitdiagnosztika és beosztási ajánlórendszer KKV-knak.</div>',
     unsafe_allow_html=True
@@ -1193,6 +1193,14 @@ matrix, pair = build_worker_machine_matrix(filtered)
 recs = generate_recommendations(filtered, pair)
 assignment = recommended_assignment(pair)
 
+# Biztonsági alapértékek, hogy a vezetői áttekintő sose fusson NameError-ra
+default_plan_df = pd.DataFrame()
+default_worker_plan = pd.DataFrame()
+default_fulfillment_df = pd.DataFrame()
+default_capacity_df = pd.DataFrame()
+default_plan_recs = []
+
+
 # V7: ha van rendelésállomány, a vezetői áttekintő exportja is tartalmazzon tervet és beosztást.
 orders_demand_global = demand_from_orders(orders_df) if "orders_df" in globals() else {}
 if not orders_demand_global:
@@ -1237,7 +1245,7 @@ with tabs[0]:
         show_kpi("Becsült profit", fmt_huf(profit), "Árbevétel - anyag - gépköltség")
 
     st.markdown("### Automatikus vezetői megállapítások")
-    render_recommendations(recs + default_plan_recs)
+    render_recommendations(recs + (default_plan_recs if 'default_plan_recs' in globals() else []))
 
     st.markdown("### Excel export")
     overview_excel = build_excel_report(filtered, pair, assignment, default_plan_df, default_worker_plan, orders_df, default_fulfillment_df, default_capacity_df)
@@ -1421,7 +1429,7 @@ with tabs[5]:
 # ------------------------------------------------------------
 with tabs[6]:
     st.subheader("Gyártási terv szimulátor + dolgozói beosztás")
-    st.caption("V7.1: a tervezett db rendelésállományból, tervezési horizontból, gépórából és múltbeli termék-gép teljesítményből számolódik.")
+    st.caption("V7.2: a tervezett db rendelésállományból, tervezési horizontból, gépórából és múltbeli termék-gép teljesítményből számolódik.")
 
     if orders_df is not None and not orders_df.empty:
         st.success("Megrendelések munkalap felismerve: a tervezés rendelésállományból indul.")
@@ -1543,9 +1551,9 @@ with tabs[6]:
     st.markdown("### 5. Export")
     excel_bytes = build_excel_report(filtered, pair, assignment, plan_df, worker_plan, orders_df, fulfillment_df, capacity_df)
     st.download_button(
-        "⬇️ V7.1 Excel riport letöltése",
+        "⬇️ V7.2 Excel riport letöltése",
         data=excel_bytes,
-        file_name="gyartasi_diagnosztika_v7_1_riport.xlsx",
+        file_name="gyartasi_diagnosztika_v7_2_riport.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
