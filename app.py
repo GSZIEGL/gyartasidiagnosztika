@@ -7,9 +7,19 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+except Exception:
+    SimpleDocTemplate = None
+
+
 
 st.set_page_config(
-    page_title="Gyártási Diagnosztika V1",
+    page_title="Gyártási Diagnosztika V2",
     page_icon="🏭",
     layout="wide"
 )
@@ -232,6 +242,7 @@ def build_worker_machine_matrix(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def generate_recommendations(df: pd.DataFrame, pair: pd.DataFrame) -> List[Tuple[str, str]]:
+    """Mindig adjon vezetői javaslatokat, ne csak extrém eltérésnél."""
     recs = []
 
     shift = aggregate_metrics(df, ["Műszak"])
@@ -239,37 +250,54 @@ def generate_recommendations(df: pd.DataFrame, pair: pd.DataFrame) -> List[Tuple
         worst_shift = shift.sort_values("Átlag_OEE").iloc[0]
         best_shift = shift.sort_values("Átlag_OEE", ascending=False).iloc[0]
         diff = best_shift["Átlag_OEE"] - worst_shift["Átlag_OEE"]
-        if diff > 5:
-            recs.append((
-                "warning",
-                f"A(z) {worst_shift['Műszak']} műszak OEE-je {diff:.1f} ponttal gyengébb, mint a(z) {best_shift['Műszak']} műszaké."
-            ))
+        recs.append((
+            "warning" if diff >= 3 else "success",
+            f"Műszakhatás: a(z) {best_shift['Műszak']} műszak OEE-je {diff:.1f} ponttal jobb, mint a(z) {worst_shift['Műszak']} műszaké. "
+            f"Érdemes megnézni, hogy ember-, gép- vagy termékösszetétel okozza-e."
+        ))
 
     machine = aggregate_metrics(df, ["Gép"])
-    worst_machine = machine.sort_values(["Selejt_%", "Állásidő_perc"], ascending=False).iloc[0]
-    if worst_machine["Selejt_%"] > machine["Selejt_%"].mean() * 1.2 or worst_machine["Állásidő_perc"] > machine["Állásidő_perc"].mean() * 1.2:
+    if not machine.empty:
+        worst_machine = machine.sort_values(["Állásidő_perc", "Selejt_%"], ascending=False).iloc[0]
+        best_machine = machine.sort_values("Átlag_OEE", ascending=False).iloc[0]
         recs.append((
-            "danger",
-            f"A(z) {worst_machine['Gép']} kiemelt beavatkozási pont: magas selejt vagy állásidő látszik."
+            "danger" if worst_machine["Állásidő_perc"] > machine["Állásidő_perc"].median() else "warning",
+            f"Gépdiagnosztika: a(z) {worst_machine['Gép']} gépen a legmagasabb az állásidő/selejt kombináció. "
+            f"A legjobb OEE-t jelenleg a(z) {best_machine['Gép']} hozza."
+        ))
+
+    worker = aggregate_metrics(df, ["Dolgozó"])
+    if not worker.empty:
+        top_worker = worker.sort_values("Átlag_OEE", ascending=False).iloc[0]
+        low_worker = worker.sort_values("Átlag_OEE").iloc[0]
+        recs.append((
+            "success",
+            f"Dolgozói teljesítmény: {top_worker['Dolgozó']} hozza a legjobb átlagos OEE-t ({top_worker['Átlag_OEE']:.1f}%). "
+            f"{low_worker['Dolgozó']} esetében érdemes megnézni, hogy rossz gépen vagy nehezebb terméken dolgozik-e."
         ))
 
     best_pairs = pair.sort_values("Kompatibilitási_pont", ascending=False).head(3)
     if not best_pairs.empty:
         text = "; ".join([f"{r['Dolgozó']} → {r['Gép']} ({r['Kompatibilitási_pont']:.0f} pont)" for _, r in best_pairs.iterrows()])
-        recs.append(("success", f"Legjobb dolgozó–gép párosok: {text}."))
+        recs.append(("success", f"Legjobb dolgozó–gép párosok: {text}. Ezeket a párosokat érdemes preferálni beosztáskor."))
 
-    weak_pairs = pair[pair["Sorok"] >= 5].sort_values("Kompatibilitási_pont").head(3)
+    weak_pairs = pair[pair["Sorok"] >= 3].sort_values("Kompatibilitási_pont").head(3)
     if not weak_pairs.empty:
         text = "; ".join([f"{r['Dolgozó']} + {r['Gép']} ({r['Kompatibilitási_pont']:.0f} pont)" for _, r in weak_pairs.iterrows()])
-        recs.append(("warning", f"Figyelendő párosítások: {text}."))
+        recs.append(("warning", f"Figyelendő párosítások: {text}. Nem biztos, hogy rossz dolgozókról van szó, lehet, hogy rossz gép–ember párosítás."))
 
     product = aggregate_metrics(df, ["Termék"])
     if not product.empty:
+        best_product = product.sort_values("Profit/db", ascending=False).iloc[0]
         worst_product = product.sort_values("Profit/db").iloc[0]
         recs.append((
             "warning",
-            f"A(z) {worst_product['Termék']} termék hozza a legalacsonyabb becsült profitot darabonként ({fmt_huf(worst_product['Profit/db'])})."
+            f"Termék/profit: a(z) {best_product['Termék']} termék profit/db alapján a legerősebb, "
+            f"a(z) {worst_product['Termék']} a leggyengébb. Gyártási prioritásnál ezt érdemes figyelembe venni."
         ))
+
+    if len(recs) == 0:
+        recs.append(("warning", "Még kevés adat van, de az app már felépítette az alap mutatókat. Tölts fel több sort vagy hosszabb időszakot."))
 
     return recs
 
@@ -280,6 +308,96 @@ def recommended_assignment(pair: pd.DataFrame) -> pd.DataFrame:
     best = pair.sort_values("Kompatibilitási_pont", ascending=False).groupby("Gép", as_index=False).head(1)
     best = best[["Gép", "Dolgozó", "Kompatibilitási_pont", "Átlag_teljesítmény", "Selejt_%", "Profit/db"]]
     return best.sort_values("Gép")
+
+
+
+def build_pdf_report(df: pd.DataFrame, pair: pd.DataFrame, recs: List[Tuple[str, str]]) -> bytes:
+    """Egyszerű vezetői PDF riport."""
+    if SimpleDocTemplate is None:
+        return None
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=1.2 * cm,
+        leftMargin=1.2 * cm,
+        topMargin=1.0 * cm,
+        bottomMargin=1.0 * cm,
+    )
+
+    styles = getSampleStyleSheet()
+    title = ParagraphStyle("TitleHU", parent=styles["Title"], fontSize=18, leading=22, textColor=colors.HexColor("#0f172a"))
+    h2 = ParagraphStyle("H2HU", parent=styles["Heading2"], fontSize=12, leading=15, textColor=colors.HexColor("#1e3a8a"))
+    body = ParagraphStyle("BodyHU", parent=styles["Normal"], fontSize=8.5, leading=10.5)
+
+    def safe(x):
+        return str(x or "").replace("ő", "ö").replace("Ő", "Ö").replace("ű", "ü").replace("Ű", "Ü")
+
+    def P(x, style=body):
+        return Paragraph(safe(x), style)
+
+    total_qty = df["Gyártott_db"].sum()
+    scrap_pct = df["Selejt_db"].sum() / total_qty * 100 if total_qty else 0
+    downtime = df["Állásidő_perc"].sum()
+    avg_oee = df["OEE_light_%"].mean()
+    profit = df["Becsült_profit"].sum()
+
+    story = []
+    story.append(P("Gyártási Diagnosztika V2 – vezetői riport", title))
+    story.append(P("Excelből készült automatikus ember–gép, OEE light és profitdiagnosztika.", body))
+    story.append(Spacer(1, 0.25 * cm))
+
+    kpi_data = [
+        [P("Gyártott db"), P("Selejt %"), P("Állásidő"), P("OEE Light"), P("Becsült profit")],
+        [P(fmt_num(total_qty)), P(fmt_pct(scrap_pct)), P(f"{fmt_num(downtime)} perc"), P(fmt_pct(avg_oee)), P(fmt_huf(profit))],
+    ]
+    table = Table(kpi_data, colWidths=[3.3 * cm] * 5)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1e3a8a")),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+        ("BACKGROUND", (0,1), (-1,1), colors.HexColor("#eff6ff")),
+        ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#cbd5e1")),
+        ("ALIGN", (0,0), (-1,-1), "CENTER"),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("TOPPADDING", (0,0), (-1,-1), 6),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 0.3 * cm))
+
+    story.append(P("Vezetői javaslatok", h2))
+    for cls, text in recs:
+        story.append(P("• " + text))
+        story.append(Spacer(1, 0.08 * cm))
+
+    story.append(Spacer(1, 0.2 * cm))
+    story.append(P("Legjobb dolgozó–gép párosok", h2))
+    top_pairs = pair.sort_values("Kompatibilitási_pont", ascending=False).head(8)
+    if not top_pairs.empty:
+        data = [["Dolgozó", "Gép", "Pont", "Teljesítmény %", "Selejt %"]]
+        for _, r in top_pairs.iterrows():
+            data.append([
+                safe(r["Dolgozó"]),
+                safe(r["Gép"]),
+                f"{r['Kompatibilitási_pont']:.0f}",
+                f"{r['Átlag_teljesítmény']:.1f}",
+                f"{r['Selejt_%']:.1f}",
+            ])
+        t = Table([[P(c) for c in row] for row in data], colWidths=[3.6*cm, 3.0*cm, 2.5*cm, 3.5*cm, 3.0*cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0f766e")),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+            ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#cbd5e1")),
+            ("BACKGROUND", (0,1), (-1,-1), colors.HexColor("#f8fafc")),
+        ]))
+        story.append(t)
+
+    story.append(Spacer(1, 0.25 * cm))
+    story.append(P("Megjegyzés: a V2 riport döntéstámogató becslés. A pontos okok feltárásához a helyi folyamatokat és adatminőséget is érdemes ellenőrizni.", body))
+
+    doc.build(story)
+    return buffer.getvalue()
 
 
 def render_recommendations(recs: List[Tuple[str, str]]):
@@ -293,7 +411,7 @@ def render_recommendations(recs: List[Tuple[str, str]]):
 # ------------------------------------------------------------
 # Header
 # ------------------------------------------------------------
-st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V1</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V2</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="subtitle">Excelből működő ember–gép hatékonyság, OEE light, profitdiagnosztika és beosztási ajánlórendszer KKV-knak.</div>',
     unsafe_allow_html=True
@@ -411,6 +529,20 @@ with tabs[0]:
     st.markdown("### Automatikus vezetői megállapítások")
     render_recommendations(recs)
 
+    st.markdown("### PDF export")
+    if st.button("Vezetői PDF riport elkészítése", use_container_width=True):
+        pdf_bytes = build_pdf_report(filtered, pair, recs)
+        if pdf_bytes is None:
+            st.error("A PDF exporthoz telepíteni kell a reportlab csomagot.")
+        else:
+            st.download_button(
+                "⬇️ PDF riport letöltése",
+                data=pdf_bytes,
+                file_name="gyartasi_diagnosztika_vezetoi_riport.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+
     c1, c2 = st.columns(2)
     with c1:
         daily = filtered.groupby("Dátum", as_index=False).agg(Gyártott_db=("Gyártott_db", "sum"), Becsült_profit=("Becsült_profit", "sum"))
@@ -508,7 +640,7 @@ with tabs[4]:
 with tabs[5]:
     st.subheader("Ajánlórendszer – Holnap kit hova tegyek?")
 
-    st.caption("V1 logika: minden gépre azt a dolgozót ajánlja, aki a múltbeli adatok alapján ott a legjobb kompatibilitási pontot hozta.")
+    st.caption("V2 alaplogika: minden gépre azt a dolgozót ajánlja, aki a múltbeli adatok alapján ott a legjobb kompatibilitási pontot hozta.")
 
     assignment = recommended_assignment(pair)
     st.dataframe(assignment, use_container_width=True, hide_index=True)
