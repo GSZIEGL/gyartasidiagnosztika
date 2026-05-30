@@ -19,7 +19,7 @@ except Exception:
 
 
 st.set_page_config(
-    page_title="Gyártási Diagnosztika V2",
+    page_title="Gyártási Diagnosztika V3",
     page_icon="🏭",
     layout="wide"
 )
@@ -76,6 +76,12 @@ st.markdown(
         padding: 14px 16px;
         margin-bottom: 10px;
         box-shadow: 0 6px 18px rgba(15,23,42,.06);
+        color: #0f172a !important;
+        font-weight: 650;
+        line-height: 1.45;
+    }
+    .insight-card * {
+        color: #0f172a !important;
     }
     .danger {
         border-left-color: #dc2626;
@@ -344,7 +350,7 @@ def build_pdf_report(df: pd.DataFrame, pair: pd.DataFrame, recs: List[Tuple[str,
     profit = df["Becsült_profit"].sum()
 
     story = []
-    story.append(P("Gyártási Diagnosztika V2 – vezetői riport", title))
+    story.append(P("Gyártási Diagnosztika V3 – vezetői riport", title))
     story.append(P("Excelből készült automatikus ember–gép, OEE light és profitdiagnosztika.", body))
     story.append(Spacer(1, 0.25 * cm))
 
@@ -393,11 +399,122 @@ def build_pdf_report(df: pd.DataFrame, pair: pd.DataFrame, recs: List[Tuple[str,
         ]))
         story.append(t)
 
+
+    story.append(Spacer(1, 0.2 * cm))
+    story.append(P("Optimalizált beosztási javaslat", h2))
+    try:
+        opt = optimized_assignment(pair, [], [], True)
+        if not opt.empty:
+            data = [["Gép", "Ajánlott dolgozó", "Pont", "Teljesítmény %", "Selejt %"]]
+            for _, r in opt.iterrows():
+                data.append([
+                    safe(r["Gép"]),
+                    safe(r["Ajánlott dolgozó"]),
+                    f"{r['Kompatibilitási_pont']:.0f}",
+                    f"{r['Várható teljesítmény_%']:.1f}",
+                    f"{r['Várható selejt_%']:.1f}",
+                ])
+            t2 = Table([[P(c) for c in row] for row in data], colWidths=[3.2*cm, 4.2*cm, 2.4*cm, 3.5*cm, 3.0*cm])
+            t2.setStyle(TableStyle([
+                ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1e3a8a")),
+                ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+                ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#cbd5e1")),
+                ("BACKGROUND", (0,1), (-1,-1), colors.HexColor("#f8fafc")),
+            ]))
+            story.append(t2)
+        else:
+            story.append(P("Nincs elég adat optimalizált javaslat készítéséhez."))
+    except Exception as exc:
+        story.append(P(f"Optimalizált javaslat nem készült el: {exc}"))
+
+
     story.append(Spacer(1, 0.25 * cm))
-    story.append(P("Megjegyzés: a V2 riport döntéstámogató becslés. A pontos okok feltárásához a helyi folyamatokat és adatminőséget is érdemes ellenőrizni.", body))
+    story.append(P("Megjegyzés: a V3 riport döntéstámogató becslés. A pontos okok feltárásához a helyi folyamatokat és adatminőséget is érdemes ellenőrizni.", body))
 
     doc.build(story)
     return buffer.getvalue()
+
+
+
+def optimized_assignment(
+    pair: pd.DataFrame,
+    unavailable_workers: List[str] = None,
+    unavailable_machines: List[str] = None,
+    one_worker_once: bool = True
+) -> pd.DataFrame:
+    """V2 optimalizáló: dolgozó/gép kizárás és egyszerű greedy beosztás.
+
+    Cél: minden elérhető gépre a lehető legjobb dolgozó-gép párosítás,
+    opcionálisan úgy, hogy egy dolgozó csak egyszer szerepelhet.
+    """
+    unavailable_workers = unavailable_workers or []
+    unavailable_machines = unavailable_machines or []
+
+    available = pair[
+        ~pair["Dolgozó"].isin(unavailable_workers)
+        & ~pair["Gép"].isin(unavailable_machines)
+    ].copy()
+
+    if available.empty:
+        return pd.DataFrame(columns=[
+            "Gép", "Ajánlott dolgozó", "Kompatibilitási_pont",
+            "Várható teljesítmény_%", "Várható selejt_%", "Várható profit/db"
+        ])
+
+    assignments = []
+    used_workers = set()
+
+    # A legfontosabb gépekkel kezdünk: ahol magasabb átlagprofit/db vagy teljesítmény látszik.
+    machine_priority = (
+        available.groupby("Gép", as_index=False)
+        .agg(
+            Átlag_pont=("Kompatibilitási_pont", "mean"),
+            Átlag_profit=("Profit/db", "mean"),
+            Sorok=("Sorok", "sum")
+        )
+        .sort_values(["Átlag_profit", "Átlag_pont"], ascending=False)
+    )
+
+    for machine in machine_priority["Gép"].tolist():
+        candidates = available[available["Gép"] == machine].sort_values("Kompatibilitási_pont", ascending=False)
+        if one_worker_once:
+            candidates = candidates[~candidates["Dolgozó"].isin(used_workers)]
+        if candidates.empty:
+            continue
+
+        best = candidates.iloc[0]
+        used_workers.add(best["Dolgozó"])
+        assignments.append({
+            "Gép": best["Gép"],
+            "Ajánlott dolgozó": best["Dolgozó"],
+            "Kompatibilitási_pont": round(best["Kompatibilitási_pont"], 1),
+            "Várható teljesítmény_%": round(best["Átlag_teljesítmény"], 1),
+            "Várható selejt_%": round(best["Selejt_%"], 2),
+            "Várható profit/db": round(best["Profit/db"], 0),
+        })
+
+    return pd.DataFrame(assignments).sort_values("Gép")
+
+
+def compare_assignment_scenarios(pair: pd.DataFrame, current_assignment: pd.DataFrame, optimized: pd.DataFrame) -> pd.DataFrame:
+    """Egyszerű összehasonlítás a mostani V1 és optimalizált beosztás között."""
+    if optimized is None or optimized.empty:
+        return pd.DataFrame([{
+            "Mutató": "Optimalizált beosztás",
+            "Érték": "Nincs elég adat / túl sok kizárás"
+        }])
+
+    current_score = current_assignment["Kompatibilitási_pont"].mean() if not current_assignment.empty else np.nan
+    opt_score = optimized["Kompatibilitási_pont"].mean()
+    current_profit = current_assignment["Profit/db"].mean() if "Profit/db" in current_assignment.columns and not current_assignment.empty else np.nan
+    opt_profit = optimized["Várható profit/db"].mean()
+
+    rows = [
+        {"Mutató": "Átlag kompatibilitási pont", "Jelenlegi egyszerű ajánlás": round(current_score, 1), "Optimalizált": round(opt_score, 1), "Változás": round(opt_score - current_score, 1) if pd.notna(current_score) else "-"},
+        {"Mutató": "Átlag profit/db", "Jelenlegi egyszerű ajánlás": round(current_profit, 0) if pd.notna(current_profit) else "-", "Optimalizált": round(opt_profit, 0), "Változás": round(opt_profit - current_profit, 0) if pd.notna(current_profit) else "-"},
+        {"Mutató": "Beosztott gépek száma", "Jelenlegi egyszerű ajánlás": len(current_assignment), "Optimalizált": len(optimized), "Változás": len(optimized) - len(current_assignment)},
+    ]
+    return pd.DataFrame(rows)
 
 
 def render_recommendations(recs: List[Tuple[str, str]]):
@@ -411,7 +528,7 @@ def render_recommendations(recs: List[Tuple[str, str]]):
 # ------------------------------------------------------------
 # Header
 # ------------------------------------------------------------
-st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V2</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V3</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="subtitle">Excelből működő ember–gép hatékonyság, OEE light, profitdiagnosztika és beosztási ajánlórendszer KKV-knak.</div>',
     unsafe_allow_html=True
@@ -640,19 +757,60 @@ with tabs[4]:
 with tabs[5]:
     st.subheader("Ajánlórendszer – Holnap kit hova tegyek?")
 
-    st.caption("V2 alaplogika: minden gépre azt a dolgozót ajánlja, aki a múltbeli adatok alapján ott a legjobb kompatibilitási pontot hozta.")
+    st.caption("V2 alaplogika: dolgozó–gép kompatibilitás alapján javasol beosztást. Már kezel dolgozó kiesést, gépkiesést és egyszeres dolgozóhasználatot.")
 
+    st.markdown("### Alap javasolt beosztás")
     assignment = recommended_assignment(pair)
     st.dataframe(assignment, use_container_width=True, hide_index=True)
+
+    st.markdown("### Mi lenne ha? / optimalizáló")
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        unavailable_workers = st.multiselect(
+            "Kieső / nem elérhető dolgozók",
+            sorted(filtered["Dolgozó"].dropna().unique()),
+            default=[]
+        )
+
+    with c2:
+        unavailable_machines = st.multiselect(
+            "Kieső / nem használható gépek",
+            sorted(filtered["Gép"].dropna().unique()),
+            default=[]
+        )
+
+    with c3:
+        one_worker_once = st.checkbox(
+            "Egy dolgozó csak egy gépre kerüljön",
+            value=True,
+            help="Valós beosztáshoz általában ezt érdemes bekapcsolni."
+        )
+
+    optimized = optimized_assignment(
+        pair,
+        unavailable_workers=unavailable_workers,
+        unavailable_machines=unavailable_machines,
+        one_worker_once=one_worker_once
+    )
+
+    st.markdown("### Optimalizált javasolt beosztás")
+    if optimized.empty:
+        st.warning("A kiválasztott kizárások mellett nincs elég adat javaslat készítéséhez.")
+    else:
+        st.dataframe(optimized, use_container_width=True, hide_index=True)
+
+    st.markdown("### Várható hatás")
+    scenario = compare_assignment_scenarios(pair, assignment, optimized)
+    st.dataframe(scenario, use_container_width=True, hide_index=True)
 
     st.markdown("### Vezetői javaslatok")
     render_recommendations(recs)
 
     st.markdown("### Következő fejlesztési szint")
     st.info(
-        "V2-ben ide jöhet valódi optimalizálás: dolgozó egyszerre csak egy gépen lehet, szabadság, gépkiesés, rendelésállomány, profitmaximalizálás."
+        "V3-ban ide jöhet rendelésállomány, műszakórák, termékprioritás, dolgozói jogosultságok és profitmaximalizáló optimalizálás."
     )
-
 
 # ------------------------------------------------------------
 # 7. Adatellenőrzés
