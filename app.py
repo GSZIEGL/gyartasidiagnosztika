@@ -13,13 +13,14 @@ try:
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import cm
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.graphics.shapes import Drawing, Rect, String, Line
 except Exception:
     SimpleDocTemplate = None
 
 
 
 st.set_page_config(
-    page_title="Gyártási Diagnosztika V7.2",
+    page_title="Gyártási Diagnosztika V8",
     page_icon="🏭",
     layout="wide"
 )
@@ -324,6 +325,143 @@ def recommended_assignment(pair: pd.DataFrame) -> pd.DataFrame:
 
 
 
+
+def pdf_safe_text(value):
+    """ReportLab alap fontokhoz biztonságos, ékezet-kímélő szöveg."""
+    return (
+        str(value or "")
+        .replace("ő", "ö").replace("Ő", "Ö")
+        .replace("ű", "ü").replace("Ű", "Ü")
+    )
+
+
+def _pdf_color_for_score(value, inverse=False):
+    try:
+        v = float(value)
+    except Exception:
+        v = 0
+    if inverse:
+        if v <= 35:
+            return "#16a34a", "Alacsony"
+        if v <= 70:
+            return "#f59e0b", "Figyelendő"
+        return "#dc2626", "Magas"
+    if v >= 75:
+        return "#16a34a", "Erős"
+    if v >= 50:
+        return "#f59e0b", "Közepes"
+    return "#dc2626", "Gyenge"
+
+
+def make_pdf_gauge(title, value, suffix="%", inverse=False, width=165, height=90):
+    """Egyszerű, stabil PDF gauge Drawing objektummal."""
+    try:
+        value = float(value)
+    except Exception:
+        value = 0
+    value = max(0, min(100, value))
+    color, label = _pdf_color_for_score(value, inverse=inverse)
+
+    d = Drawing(width, height)
+    d.add(Rect(0, 0, width, height, fillColor=colors.HexColor("#f8fafc"), strokeColor=colors.HexColor("#cbd5e1"), rx=10, ry=10))
+    d.add(String(10, height - 18, pdf_safe_text(title), fontSize=8, fillColor=colors.HexColor("#334155")))
+
+    # Track
+    x0, y0, w, h = 10, 34, width - 20, 12
+    d.add(Rect(x0, y0, w, h, fillColor=colors.HexColor("#e5e7eb"), strokeColor=colors.HexColor("#e5e7eb"), rx=5, ry=5))
+    d.add(Rect(x0, y0, w * value / 100, h, fillColor=colors.HexColor(color), strokeColor=colors.HexColor(color), rx=5, ry=5))
+
+    d.add(String(10, 14, f"{value:.1f}{suffix}", fontSize=15, fillColor=colors.HexColor(color)))
+    d.add(String(78, 17, pdf_safe_text(label), fontSize=8, fillColor=colors.HexColor("#475569")))
+    return d
+
+
+def make_pdf_bar_chart(title, df, label_col, value_col, value_suffix="", width=500, height=175, top_n=8):
+    """PDF-be rajzolt egyszerű horizontális bar chart."""
+    d = Drawing(width, height)
+    d.add(String(0, height - 12, pdf_safe_text(title), fontSize=10, fillColor=colors.HexColor("#0f172a")))
+
+    if df is None or df.empty or label_col not in df.columns or value_col not in df.columns:
+        d.add(String(0, height / 2, pdf_safe_text("Nincs adat a diagramhoz."), fontSize=8, fillColor=colors.HexColor("#64748b")))
+        return d
+
+    data = df[[label_col, value_col]].dropna().copy().head(top_n)
+    if data.empty:
+        d.add(String(0, height / 2, pdf_safe_text("Nincs adat a diagramhoz."), fontSize=8, fillColor=colors.HexColor("#64748b")))
+        return d
+
+    max_val = max(float(data[value_col].max()), 1)
+    chart_top = height - 28
+    row_h = min(16, (height - 38) / max(len(data), 1))
+    label_w = 110
+    bar_w = width - label_w - 70
+
+    for i, (_, r) in enumerate(data.iterrows()):
+        y = chart_top - (i + 1) * row_h
+        label = pdf_safe_text(str(r[label_col]))[:24]
+        val = float(r[value_col])
+        bw = bar_w * val / max_val
+
+        d.add(String(0, y + 3, label, fontSize=7, fillColor=colors.HexColor("#334155")))
+        d.add(Rect(label_w, y + 2, bar_w, 8, fillColor=colors.HexColor("#e5e7eb"), strokeColor=colors.HexColor("#e5e7eb")))
+        d.add(Rect(label_w, y + 2, bw, 8, fillColor=colors.HexColor("#2563eb"), strokeColor=colors.HexColor("#2563eb")))
+        d.add(String(label_w + bar_w + 6, y + 2, pdf_safe_text(f"{val:.0f}{value_suffix}"), fontSize=7, fillColor=colors.HexColor("#0f172a")))
+    return d
+
+
+def make_pdf_capacity_chart(capacity_df, width=500, height=165):
+    d = Drawing(width, height)
+    d.add(String(0, height - 12, "Gépkapacitás kihasználtság", fontSize=10, fillColor=colors.HexColor("#0f172a")))
+
+    if capacity_df is None or capacity_df.empty or "Gép" not in capacity_df.columns or "Kihasználtság_%" not in capacity_df.columns:
+        d.add(String(0, height / 2, "Nincs kapacitásadat.", fontSize=8, fillColor=colors.HexColor("#64748b")))
+        return d
+
+    data = capacity_df[["Gép", "Kihasználtság_%"]].copy().head(8)
+    chart_top = height - 30
+    row_h = min(18, (height - 42) / max(len(data), 1))
+    label_w = 90
+    bar_w = width - label_w - 70
+
+    for i, (_, r) in enumerate(data.iterrows()):
+        y = chart_top - (i + 1) * row_h
+        val = max(0, min(120, float(r["Kihasználtság_%"])))
+        color = "#16a34a" if val < 75 else "#f59e0b" if val < 95 else "#dc2626"
+
+        d.add(String(0, y + 4, pdf_safe_text(r["Gép"]), fontSize=8, fillColor=colors.HexColor("#334155")))
+        d.add(Rect(label_w, y + 2, bar_w, 10, fillColor=colors.HexColor("#e5e7eb"), strokeColor=colors.HexColor("#e5e7eb")))
+        d.add(Rect(label_w, y + 2, bar_w * min(val, 100) / 100, 10, fillColor=colors.HexColor(color), strokeColor=colors.HexColor(color)))
+        d.add(String(label_w + bar_w + 6, y + 2, f"{val:.0f}%", fontSize=8, fillColor=colors.HexColor(color)))
+    return d
+
+
+def pdf_insight_card(text, kind="info", width=500):
+    """Színes PDF insight kártya ikonokkal."""
+    palette = {
+        "danger": ("#fee2e2", "#dc2626", "!!"),
+        "warning": ("#fef3c7", "#f59e0b", "!"),
+        "success": ("#dcfce7", "#16a34a", "+"),
+        "info": ("#dbeafe", "#2563eb", "i"),
+    }
+    bg, accent, icon = palette.get(kind, palette["info"])
+    t = Table(
+        [[Paragraph(f"<b>{icon}</b>", ParagraphStyle("IconStyle", fontSize=13, textColor=colors.HexColor(accent))),
+          Paragraph(pdf_safe_text(text), ParagraphStyle("CardText", fontSize=8.5, leading=11, textColor=colors.HexColor("#0f172a")))]],
+        colWidths=[0.8 * cm, width - 0.8 * cm]
+    )
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,-1), colors.HexColor(bg)),
+        ("BOX", (0,0), (-1,-1), 0.5, colors.HexColor(accent)),
+        ("LINEBEFORE", (0,0), (0,-1), 5, colors.HexColor(accent)),
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("TOPPADDING", (0,0), (-1,-1), 7),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 7),
+        ("LEFTPADDING", (0,0), (-1,-1), 8),
+        ("RIGHTPADDING", (0,0), (-1,-1), 8),
+    ]))
+    return t
+
+
 def build_pdf_report(
     df: pd.DataFrame,
     pair: pd.DataFrame,
@@ -336,7 +474,7 @@ def build_pdf_report(
     capacity_df: pd.DataFrame = None,
     plan_recs: List[Tuple[str, str]] = None
 ) -> bytes:
-    """Teljes vezetői PDF riport: minden releváns fülből hoz összefoglalót."""
+    """V8: vizuális, prezentációsabb vezetői PDF riport."""
     if SimpleDocTemplate is None:
         return None
 
@@ -351,32 +489,33 @@ def build_pdf_report(
     )
 
     styles = getSampleStyleSheet()
-    title = ParagraphStyle("TitleHU", parent=styles["Title"], fontSize=17, leading=21, textColor=colors.HexColor("#0f172a"))
-    h2 = ParagraphStyle("H2HU", parent=styles["Heading2"], fontSize=11, leading=14, textColor=colors.HexColor("#1e3a8a"))
-    body = ParagraphStyle("BodyHU", parent=styles["Normal"], fontSize=8.0, leading=9.8)
-
-    def safe(x):
-        return str(x or "").replace("ő", "ö").replace("Ő", "Ö").replace("ű", "ü").replace("Ű", "Ü")
+    title = ParagraphStyle("TitleHU", parent=styles["Title"], fontSize=18, leading=22, textColor=colors.HexColor("#0f172a"))
+    h2 = ParagraphStyle("H2HU", parent=styles["Heading2"], fontSize=12, leading=15, textColor=colors.HexColor("#1e3a8a"))
+    body = ParagraphStyle("BodyHU", parent=styles["Normal"], fontSize=8.3, leading=10.3, textColor=colors.HexColor("#334155"))
 
     def P(x, style=body):
-        return Paragraph(safe(x), style)
+        return Paragraph(pdf_safe_text(x), style)
 
-    def add_df_table(title_txt, data_df, cols, max_rows=10):
+    def add_df_table(title_txt, data_df, cols, max_rows=8):
         story.append(P(title_txt, h2))
         if data_df is None or data_df.empty:
             story.append(P("Nincs adat."))
             story.append(Spacer(1, 0.12 * cm))
             return
+
         rows = [cols]
         for _, r in data_df.head(max_rows).iterrows():
-            rows.append([safe(r.get(c, "")) for c in cols])
+            rows.append([pdf_safe_text(r.get(c, "")) for c in cols])
+
         table = Table([[P(c) for c in row] for row in rows], repeatRows=1)
         table.setStyle(TableStyle([
-            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1e3a8a")),
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0f172a")),
             ("TEXTCOLOR", (0,0), (-1,0), colors.white),
             ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#cbd5e1")),
             ("BACKGROUND", (0,1), (-1,-1), colors.HexColor("#f8fafc")),
             ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("TOPPADDING", (0,0), (-1,-1), 5),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
         ]))
         story.append(table)
         story.append(Spacer(1, 0.18 * cm))
@@ -388,47 +527,85 @@ def build_pdf_report(
     profit = df["Becsült_profit"].sum()
 
     story = []
-    story.append(P("Gyártási Diagnosztika V7.2 – teljes vezetői riport", title))
-    story.append(P("Ember-gép diagnosztika, rendelésállomány, gyártási terv, dolgozói beosztás és kapacitáselemzés.", body))
+    story.append(P("Gyártási Diagnosztika V8 - vezetői riport", title))
+    story.append(P("Gyors döntéstámogató összefoglaló ember-gép teljesítményről, rendelésállományról, kapacitásról és beosztásról.", body))
+    story.append(Spacer(1, 0.25 * cm))
+
+    # Gauge KPI row
+    profit_m = profit / 1_000_000
+    gauges = Table(
+        [[
+            make_pdf_gauge("OEE Light", avg_oee, "%"),
+            make_pdf_gauge("Minőség", 100 - scrap_pct, "%"),
+            make_pdf_gauge("Selejt kockázat", scrap_pct * 10, "%", inverse=True),
+        ]],
+        colWidths=[5.5 * cm, 5.5 * cm, 5.5 * cm]
+    )
+    gauges.setStyle(TableStyle([
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("ALIGN", (0,0), (-1,-1), "CENTER"),
+    ]))
+    story.append(gauges)
     story.append(Spacer(1, 0.2 * cm))
 
+    # KPI table, compact
     kpi_data = [
-        [P("Gyártott db"), P("Selejt %"), P("Állásidő"), P("OEE Light"), P("Becsült profit")],
-        [P(fmt_num(total_qty)), P(fmt_pct(scrap_pct)), P(f"{fmt_num(downtime)} perc"), P(fmt_pct(avg_oee)), P(fmt_huf(profit))],
+        [P("Gyártott db"), P("Állásidő"), P("Becsült profit"), P("Profit millió Ft")],
+        [P(fmt_num(total_qty)), P(f"{fmt_num(downtime)} perc"), P(fmt_huf(profit)), P(f"{profit_m:.1f} M Ft")],
     ]
-    table = Table(kpi_data, colWidths=[3.35 * cm] * 5)
+    table = Table(kpi_data, colWidths=[4.2 * cm] * 4)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1e3a8a")),
         ("TEXTCOLOR", (0,0), (-1,0), colors.white),
         ("BACKGROUND", (0,1), (-1,1), colors.HexColor("#eff6ff")),
         ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#cbd5e1")),
         ("ALIGN", (0,0), (-1,-1), "CENTER"),
+        ("TOPPADDING", (0,0), (-1,-1), 7),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 7),
     ]))
     story.append(table)
     story.append(Spacer(1, 0.25 * cm))
 
-    story.append(P("Vezetői javaslatok", h2))
-    for cls, text in (recs or []):
-        story.append(P("• " + text))
-    story.append(Spacer(1, 0.12 * cm))
+    # Insight cards
+    story.append(P("Fő megállapítások", h2))
+    for cls, text in (recs or [])[:4]:
+        story.append(pdf_insight_card(text, cls if cls in ["danger", "warning", "success"] else "info"))
+        story.append(Spacer(1, 0.08 * cm))
+    for cls, text in (plan_recs or [])[:3]:
+        story.append(pdf_insight_card(text, cls if cls in ["danger", "warning", "success"] else "info"))
+        story.append(Spacer(1, 0.08 * cm))
 
-    if plan_recs:
-        story.append(P("Gyártási terv javaslatok", h2))
-        for cls, text in plan_recs:
-            story.append(P("• " + text))
-        story.append(Spacer(1, 0.12 * cm))
+    story.append(Spacer(1, 0.15 * cm))
 
-    add_df_table("Top dolgozó-gép párosok", pair.sort_values("Kompatibilitási_pont", ascending=False), ["Dolgozó", "Gép", "Kompatibilitási_pont", "Átlag_teljesítmény", "Selejt_%"], 8)
+    # Charts instead of many tables
+    story.append(P("Vizuális összefoglaló", h2))
+    top_pairs_chart = pair.sort_values("Kompatibilitási_pont", ascending=False).copy()
+    top_pairs_chart["Páros"] = top_pairs_chart["Dolgozó"].astype(str) + " - " + top_pairs_chart["Gép"].astype(str)
 
-    if orders_df is not None and not orders_df.empty:
-        add_df_table("Rendelésállomány - prioritás", order_priority_view(orders_df), ["Rendelés_ID", "Vevő", "Termék", "Rendelt_db", "Határidő", "Prioritás"], 10)
+    chart_table = Table(
+        [[
+            make_pdf_bar_chart("Top dolgozó-gép párosok", top_pairs_chart, "Páros", "Kompatibilitási_pont", "", width=255, height=165, top_n=6),
+            make_pdf_capacity_chart(capacity_df, width=255, height=165),
+        ]],
+        colWidths=[8.4 * cm, 8.4 * cm]
+    )
+    chart_table.setStyle(TableStyle([
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("ALIGN", (0,0), (-1,-1), "CENTER"),
+    ]))
+    story.append(chart_table)
+    story.append(Spacer(1, 0.22 * cm))
 
-    add_df_table("Gyártási terv", plan_df, ["Rendelés_ID", "Termék", "Gép", "Igényelt_db", "Tervezett_db", "Hiány_db", "Becsült_óra"], 12)
-    add_df_table("Dolgozói beosztás", worker_plan, ["Rendelés_ID", "Gép", "Termék", "Tervezett_db", "Ajánlott_dolgozó", "Dolgozó-gép_pont"], 12)
-    add_df_table("Rendelésteljesítés", fulfillment_df, ["Termék", "Igényelt_db", "Tervezett_db", "Hiány_db", "Teljesítés_%"], 8)
+    if fulfillment_df is not None and not fulfillment_df.empty:
+        story.append(make_pdf_bar_chart("Rendelésteljesítés termékenként", fulfillment_df.sort_values("Teljesítés_%"), "Termék", "Teljesítés_%", "%", width=520, height=150, top_n=8))
+        story.append(Spacer(1, 0.22 * cm))
+
+    # Relevant tables only after charts
+    add_df_table("Gyártási terv - legfontosabb sorok", plan_df, ["Rendelés_ID", "Termék", "Gép", "Igényelt_db", "Tervezett_db", "Hiány_db", "Becsült_óra"], 10)
+    add_df_table("Dolgozói beosztási javaslat", worker_plan, ["Rendelés_ID", "Gép", "Termék", "Tervezett_db", "Ajánlott_dolgozó", "Dolgozó-gép_pont"], 10)
     add_df_table("Kapacitás / szűk keresztmetszet", capacity_df, ["Gép", "Tervezett_óra", "Max_óra", "Kihasználtság_%", "Státusz"], 8)
 
-    story.append(P("Megjegyzés: a riport döntéstámogató becslés. A helyi folyamatokat és adatminőséget mindig ellenőrizni kell.", body))
+    story.append(P("Megjegyzés: a riport döntéstámogató becslés. A helyi folyamatokat, adatminőséget és valós kapacitáskorlátokat mindig ellenőrizni kell.", body))
     doc.build(story)
     return buffer.getvalue()
 
@@ -639,7 +816,7 @@ def build_order_level_plan(
     hours_per_machine_day: float = 8.0,
     unavailable_machines: List[str] = None
 ) -> pd.DataFrame:
-    """V7.2: rendelésalapú gyártási terv.
+    """V8: rendelésalapú gyártási terv.
 
     A Tervezett_db nem önálló becslés: az Igényelt_db-ből indul,
     majd a tervezési horizont, a gépórák, a gépenkénti kapacitás és a
@@ -771,7 +948,7 @@ def build_order_level_plan(
 
 
 def build_order_fulfillment_v7(plan_df: pd.DataFrame, orders_df: pd.DataFrame = None, manual_demand: Dict[str, int] = None) -> pd.DataFrame:
-    """Rendelés/igény teljesítés termékszinten, V7.2 logikával."""
+    """Rendelés/igény teljesítés termékszinten, V8 logikával."""
     if plan_df is None or plan_df.empty:
         return pd.DataFrame()
 
@@ -837,7 +1014,7 @@ def generate_plan_insights_v7(plan_df: pd.DataFrame, fulfillment_df: pd.DataFram
     active = plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])].copy()
     total_planned = active["Tervezett_db"].sum() if not active.empty else 0
     total_profit = active["Becsült_profit"].sum() if not active.empty else 0
-    recs.append(("success", f"A V7.2 terv {fmt_num(total_planned)} db gyártást és kb. {fmt_huf(total_profit)} becsült profitot mutat."))
+    recs.append(("success", f"A V8 terv {fmt_num(total_planned)} db gyártást és kb. {fmt_huf(total_profit)} becsült profitot mutat."))
 
     if fulfillment_df is not None and not fulfillment_df.empty:
         shortage = fulfillment_df["Hiány_db"].sum()
@@ -1102,7 +1279,7 @@ def render_recommendations(recs: List[Tuple[str, str]]):
 # ------------------------------------------------------------
 # Header
 # ------------------------------------------------------------
-st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V7.2</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V8</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="subtitle">Excelből működő ember–gép hatékonyság, OEE light, profitdiagnosztika és beosztási ajánlórendszer KKV-knak.</div>',
     unsafe_allow_html=True
@@ -1429,7 +1606,7 @@ with tabs[5]:
 # ------------------------------------------------------------
 with tabs[6]:
     st.subheader("Gyártási terv szimulátor + dolgozói beosztás")
-    st.caption("V7.2: a tervezett db rendelésállományból, tervezési horizontból, gépórából és múltbeli termék-gép teljesítményből számolódik.")
+    st.caption("V8: a tervezett db rendelésállományból, tervezési horizontból, gépórából és múltbeli termék-gép teljesítményből számolódik.")
 
     if orders_df is not None and not orders_df.empty:
         st.success("Megrendelések munkalap felismerve: a tervezés rendelésállományból indul.")
@@ -1551,9 +1728,9 @@ with tabs[6]:
     st.markdown("### 5. Export")
     excel_bytes = build_excel_report(filtered, pair, assignment, plan_df, worker_plan, orders_df, fulfillment_df, capacity_df)
     st.download_button(
-        "⬇️ V7.2 Excel riport letöltése",
+        "⬇️ V8 Excel riport letöltése",
         data=excel_bytes,
-        file_name="gyartasi_diagnosztika_v7_2_riport.xlsx",
+        file_name="gyartasi_diagnosztika_v8_riport.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
