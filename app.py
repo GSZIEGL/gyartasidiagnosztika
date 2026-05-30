@@ -19,7 +19,7 @@ except Exception:
 
 
 st.set_page_config(
-    page_title="Gyártási Diagnosztika V6",
+    page_title="Gyártási Diagnosztika V6.1",
     page_icon="🏭",
     layout="wide"
 )
@@ -351,7 +351,7 @@ def build_pdf_report(df: pd.DataFrame, pair: pd.DataFrame, recs: List[Tuple[str,
     profit = df["Becsült_profit"].sum()
 
     story = []
-    story.append(P("Gyártási Diagnosztika V6 – vezetői riport", title))
+    story.append(P("Gyártási Diagnosztika V6.1 – vezetői riport", title))
     story.append(P("Excelből készült automatikus ember–gép, OEE light és profitdiagnosztika.", body))
     story.append(Spacer(1, 0.25 * cm))
 
@@ -430,7 +430,7 @@ def build_pdf_report(df: pd.DataFrame, pair: pd.DataFrame, recs: List[Tuple[str,
 
 
     story.append(Spacer(1, 0.25 * cm))
-    story.append(P("Megjegyzés: a V6 riport döntéstámogató becslés. A pontos okok feltárásához a helyi folyamatokat és adatminőséget is érdemes ellenőrizni.", body))
+    story.append(P("Megjegyzés: a V6.1 riport döntéstámogató becslés. A pontos okok feltárásához a helyi folyamatokat és adatminőséget is érdemes ellenőrizni.", body))
 
     doc.build(story)
     return buffer.getvalue()
@@ -576,7 +576,7 @@ def build_order_fulfillment(plan_df: pd.DataFrame, orders_df: pd.DataFrame) -> p
         demand["Tervezett_db"] = demand["Tervezett_db"].fillna(0)
 
     demand["Hiány_db"] = (demand["Rendelt_db"] - demand["Tervezett_db"]).clip(lower=0)
-    demand["Teljesítés_%"] = np.where(demand["Rendelt_db"] > 0, demand["Tervezett_db"] / demand["Rendelt_db"] * 100, 0).clip(upper=100).round(1)
+    demand["Teljesítés_%"] = np.minimum(np.where(demand["Rendelt_db"] > 0, demand["Tervezett_db"] / demand["Rendelt_db"] * 100, 0), 100).round(1)
     return demand.sort_values("Teljesítés_%")
 
 
@@ -881,7 +881,7 @@ def render_recommendations(recs: List[Tuple[str, str]]):
 # ------------------------------------------------------------
 # Header
 # ------------------------------------------------------------
-st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V6</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V6.1</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="subtitle">Excelből működő ember–gép hatékonyság, OEE light, profitdiagnosztika és beosztási ajánlórendszer KKV-knak.</div>',
     unsafe_allow_html=True
