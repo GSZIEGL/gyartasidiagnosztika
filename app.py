@@ -20,7 +20,7 @@ except Exception:
 
 
 st.set_page_config(
-    page_title="Gyártási Diagnosztika V8",
+    page_title="Gyártási Diagnosztika V9",
     page_icon="🏭",
     layout="wide"
 )
@@ -472,9 +472,11 @@ def build_pdf_report(
     orders_df: pd.DataFrame = None,
     fulfillment_df: pd.DataFrame = None,
     capacity_df: pd.DataFrame = None,
-    plan_recs: List[Tuple[str, str]] = None
+    plan_recs: List[Tuple[str, str]] = None,
+    root_cause_recs: List[Tuple[str, str]] = None,
+    impact_df: pd.DataFrame = None
 ) -> bytes:
-    """V8: vizuális, prezentációsabb vezetői PDF riport."""
+    """V9: vizuális, prezentációsabb vezetői PDF riport."""
     if SimpleDocTemplate is None:
         return None
 
@@ -527,8 +529,8 @@ def build_pdf_report(
     profit = df["Becsült_profit"].sum()
 
     story = []
-    story.append(P("Gyártási Diagnosztika V8 - vezetői riport", title))
-    story.append(P("Gyors döntéstámogató összefoglaló ember-gép teljesítményről, rendelésállományról, kapacitásról és beosztásról.", body))
+    story.append(P("Gyártási Diagnosztika V9 - executive riport", title))
+    story.append(P("Probléma → ok → javasolt akció → becsült hatás logikájú vezetői összefoglaló.", body))
     story.append(Spacer(1, 0.25 * cm))
 
     # Gauge KPI row
@@ -575,6 +577,16 @@ def build_pdf_report(
         story.append(pdf_insight_card(text, cls if cls in ["danger", "warning", "success"] else "info"))
         story.append(Spacer(1, 0.08 * cm))
 
+    story.append(P("Gyökérok és pénzügyi fókusz", h2))
+    for cls, text in (root_cause_recs or [])[:4]:
+        story.append(pdf_insight_card(text, cls if cls in ["danger", "warning", "success"] else "info"))
+        story.append(Spacer(1, 0.08 * cm))
+
+    if impact_df is not None and not impact_df.empty:
+        top_impact = impact_df.head(5).copy()
+        story.append(make_pdf_bar_chart("Becsült javítási potenciál", top_impact, "Elem", "Becsült_havi_hatás_Ft", " Ft", width=520, height=150, top_n=5))
+        story.append(Spacer(1, 0.15 * cm))
+
     story.append(Spacer(1, 0.15 * cm))
 
     # Charts instead of many tables
@@ -604,6 +616,7 @@ def build_pdf_report(
     add_df_table("Gyártási terv - legfontosabb sorok", plan_df, ["Rendelés_ID", "Termék", "Gép", "Igényelt_db", "Tervezett_db", "Hiány_db", "Becsült_óra"], 10)
     add_df_table("Dolgozói beosztási javaslat", worker_plan, ["Rendelés_ID", "Gép", "Termék", "Tervezett_db", "Ajánlott_dolgozó", "Dolgozó-gép_pont"], 10)
     add_df_table("Kapacitás / szűk keresztmetszet", capacity_df, ["Gép", "Tervezett_óra", "Max_óra", "Kihasználtság_%", "Státusz"], 8)
+    add_df_table("Becsült költséghatás / javítási potenciál", impact_df, ["Terület", "Elem", "Probléma", "Becsült_havi_hatás_Ft", "Javaslat"], 8)
 
     story.append(P("Megjegyzés: a riport döntéstámogató becslés. A helyi folyamatokat, adatminőséget és valós kapacitáskorlátokat mindig ellenőrizni kell.", body))
     doc.build(story)
@@ -816,7 +829,7 @@ def build_order_level_plan(
     hours_per_machine_day: float = 8.0,
     unavailable_machines: List[str] = None
 ) -> pd.DataFrame:
-    """V8: rendelésalapú gyártási terv.
+    """V9: rendelésalapú gyártási terv.
 
     A Tervezett_db nem önálló becslés: az Igényelt_db-ből indul,
     majd a tervezési horizont, a gépórák, a gépenkénti kapacitás és a
@@ -948,7 +961,7 @@ def build_order_level_plan(
 
 
 def build_order_fulfillment_v7(plan_df: pd.DataFrame, orders_df: pd.DataFrame = None, manual_demand: Dict[str, int] = None) -> pd.DataFrame:
-    """Rendelés/igény teljesítés termékszinten, V8 logikával."""
+    """Rendelés/igény teljesítés termékszinten, V9 logikával."""
     if plan_df is None or plan_df.empty:
         return pd.DataFrame()
 
@@ -1014,7 +1027,7 @@ def generate_plan_insights_v7(plan_df: pd.DataFrame, fulfillment_df: pd.DataFram
     active = plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])].copy()
     total_planned = active["Tervezett_db"].sum() if not active.empty else 0
     total_profit = active["Becsült_profit"].sum() if not active.empty else 0
-    recs.append(("success", f"A V8 terv {fmt_num(total_planned)} db gyártást és kb. {fmt_huf(total_profit)} becsült profitot mutat."))
+    recs.append(("success", f"A V9 terv {fmt_num(total_planned)} db gyártást és kb. {fmt_huf(total_profit)} becsült profitot mutat."))
 
     if fulfillment_df is not None and not fulfillment_df.empty:
         shortage = fulfillment_df["Hiány_db"].sum()
@@ -1220,7 +1233,7 @@ def build_scenario_summary(plan_df: pd.DataFrame, worker_plan: pd.DataFrame, cap
     return recs
 
 
-def build_excel_report(df: pd.DataFrame, pair: pd.DataFrame, assignment: pd.DataFrame, plan_df: pd.DataFrame = None, worker_plan: pd.DataFrame = None, orders_df: pd.DataFrame = None, fulfillment_df: pd.DataFrame = None, capacity_df: pd.DataFrame = None) -> bytes:
+def build_excel_report(df: pd.DataFrame, pair: pd.DataFrame, assignment: pd.DataFrame, plan_df: pd.DataFrame = None, worker_plan: pd.DataFrame = None, orders_df: pd.DataFrame = None, fulfillment_df: pd.DataFrame = None, capacity_df: pd.DataFrame = None, impact_df: pd.DataFrame = None) -> bytes:
     """Letölthető Excel riport több munkalappal."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -1240,6 +1253,8 @@ def build_excel_report(df: pd.DataFrame, pair: pd.DataFrame, assignment: pd.Data
             fulfillment_df.to_excel(writer, sheet_name="Rendeles_teljesites", index=False)
         if capacity_df is not None and not capacity_df.empty:
             capacity_df.to_excel(writer, sheet_name="Kapacitas", index=False)
+        if impact_df is not None and not impact_df.empty:
+            impact_df.to_excel(writer, sheet_name="Koltseg_hatas", index=False)
     return output.getvalue()
 
 
@@ -1276,10 +1291,247 @@ def render_recommendations(recs: List[Tuple[str, str]]):
         st.markdown(f'<div class="insight-card {cls}">{text}</div>', unsafe_allow_html=True)
 
 
+
+
+def estimate_improvement_value(df: pd.DataFrame) -> pd.DataFrame:
+    """Költség/profit hatásbecslés: mennyi pénz maradhat az asztalon."""
+    rows = []
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    machine = aggregate_metrics(df, ["Gép"])
+    if not machine.empty:
+        best_oee = machine["Átlag_OEE"].max()
+        for _, r in machine.iterrows():
+            gap = max(0, best_oee - r["Átlag_OEE"])
+            # Egyszerű becslés: ha az OEE gap felét behozzuk, a jó db arányosan nőhet.
+            potential_good_db = r["Jó_db"] * (gap / 100) * 0.5
+            profit_per_db = r["Profit/db"] if pd.notna(r["Profit/db"]) else 0
+            rows.append({
+                "Terület": "Gépfejlesztés",
+                "Elem": r["Gép"],
+                "Probléma": f"OEE lemaradás a legjobb géphez képest: {gap:.1f} pont",
+                "Becsült_havi_hatás_Ft": round(potential_good_db * profit_per_db, 0),
+                "Javaslat": "Karbantartás, beállítás, dolgozó-gép párosítás vagy termékáthelyezés vizsgálata"
+            })
+
+    pair = aggregate_metrics(df, ["Dolgozó", "Gép"])
+    if not pair.empty:
+        avg_scrap = pair["Selejt_%"].mean()
+        bad_pairs = pair[pair["Selejt_%"] > avg_scrap * 1.35].sort_values("Selejt_%", ascending=False).head(5)
+        for _, r in bad_pairs.iterrows():
+            avoidable_scrap = max(0, r["Selejt_db"] - (avg_scrap / 100 * r["Gyártott_db"]))
+            rows.append({
+                "Terület": "Selejtcsökkentés",
+                "Elem": f"{r['Dolgozó']} + {r['Gép']}",
+                "Probléma": f"Átlag feletti selejt: {r['Selejt_%']:.1f}%",
+                "Becsült_havi_hatás_Ft": round(avoidable_scrap * max(r["Profit/db"], 0), 0),
+                "Javaslat": "Párosítás módosítása, betanítás vagy minőségellenőrzési pont erősítése"
+            })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values("Becsült_havi_hatás_Ft", ascending=False)
+
+
+def generate_root_cause_insights(df: pd.DataFrame, pair: pd.DataFrame, impact_df: pd.DataFrame) -> List[Tuple[str, str]]:
+    """V9 szabályalapú, AI-szerű gyökérokelemzés."""
+    recs = []
+    if df is None or df.empty:
+        return recs
+
+    machine = aggregate_metrics(df, ["Gép"])
+    if not machine.empty:
+        worst = machine.sort_values(["Állásidő_perc", "Selejt_%"], ascending=False).iloc[0]
+        recs.append((
+            "danger",
+            f"Gyökérok jelölt: {worst['Gép']} egyszerre mutat magas állásidőt és selejtet. "
+            f"Ez inkább folyamat/gép/beállítás probléma lehet, nem pusztán dolgozói teljesítmény."
+        ))
+
+    shift_machine = aggregate_metrics(df, ["Műszak", "Gép"])
+    if not shift_machine.empty and len(shift_machine) > 2:
+        weak = shift_machine.sort_values("Átlag_OEE").iloc[0]
+        recs.append((
+            "warning",
+            f"Rejtett összefüggés: a leggyengébb műszak-gép kombináció: {weak['Műszak']} + {weak['Gép']} "
+            f"({weak['Átlag_OEE']:.1f}% OEE). Itt érdemes először helyszíni okot keresni."
+        ))
+
+    if impact_df is not None and not impact_df.empty:
+        top = impact_df.iloc[0]
+        recs.append((
+            "success",
+            f"Pénzügyi fókusz: a legnagyobb becsült javítási lehetőség: {top['Elem']} "
+            f"≈ {fmt_huf(top['Becsült_havi_hatás_Ft'])}. Ez legyen az első vezetői akciópont."
+        ))
+
+    return recs
+
+
+# ------------------------------------------------------------
+# V9 Excel Mapper / standardizáló réteg
+# ------------------------------------------------------------
+STANDARD_SHEET_HINTS = {
+    "production": ["termeles", "termelés", "production", "gyartas", "gyártás", "data", "adat", "riport"],
+    "machines": ["gepek", "gépek", "machines", "machine", "equipment", "eszkoz", "eszköz"],
+    "products": ["termekek", "termékek", "products", "product", "cikk", "cikkek"],
+    "orders": ["megrendelesek", "megrendelések", "rendelesek", "rendelések", "orders", "orderbook", "order_book"],
+}
+
+COLUMN_SYNONYMS = {
+    "Dátum": ["dátum", "datum", "date", "nap", "day", "termeles dátuma", "termelés dátuma", "production date"],
+    "Műszak": ["műszak", "muszak", "shift", "turnus"],
+    "Dolgozó": ["dolgozó", "dolgozo", "operator", "operátor", "employee", "worker", "munkavállaló", "munkavallalo", "név", "nev"],
+    "Gép": ["gép", "gep", "machine", "machine id", "equipment", "berendezés", "berendezes", "sor", "line"],
+    "Termék": ["termék", "termek", "product", "item", "cikk", "sku", "cikkszám", "cikkszam"],
+    "Gyártott_db": ["gyártott_db", "gyartott_db", "gyártott db", "gyartott db", "qty", "quantity", "output", "darab", "db", "produced", "produced_qty", "jó+selejt"],
+    "Selejt_db": ["selejt_db", "selejt db", "scrap", "reject", "rejects", "defect", "defects", "selejt", "bad_qty"],
+    "Állásidő_perc": ["állásidő_perc", "allasido_perc", "állásidő", "allasido", "downtime", "downtime_min", "stop time", "állás perc", "allas perc"],
+    "Kapacitás_db_óra": ["kapacitás_db_óra", "kapacitas_db_ora", "capacity", "capacity_per_hour", "db/óra", "db/ora", "névleges kapacitás", "nevleges kapacitas"],
+    "Óradíj": ["óradíj", "oradij", "hourly cost", "machine cost", "cost/hour", "gép óradíj", "gep oradij"],
+    "Kritikus_gép": ["kritikus_gép", "kritikus gep", "critical", "critical machine", "kritikus"],
+    "Elérhető_óra_nap": ["elérhető_óra_nap", "elerheto_ora_nap", "available hours", "available_hours_day", "óra/nap", "ora/nap"],
+    "Eladási_ár": ["eladási_ár", "eladasi_ar", "price", "sales price", "unit price", "ár", "ar"],
+    "Anyagköltség": ["anyagköltség", "anyagkoltseg", "material cost", "material", "unit material", "anyag"],
+    "Prioritási_súly": ["prioritási_súly", "prioritasi_suly", "priority weight", "weight", "súly", "suly"],
+    "Rendelés_ID": ["rendelés_id", "rendeles_id", "order id", "order_id", "order", "po", "rendelésszám", "rendelesszam"],
+    "Vevő": ["vevő", "vevo", "customer", "client", "partner"],
+    "Rendelt_db": ["rendelt_db", "rendelt db", "ordered qty", "order qty", "quantity", "qty", "igény", "igeny"],
+    "Határidő": ["határidő", "hatarido", "due date", "deadline", "delivery date", "szállítás", "szallitas"],
+    "Prioritás": ["prioritás", "prioritas", "priority", "fontosság", "fontossag"],
+}
+
+def _norm_col_name(x: str) -> str:
+    txt = str(x or "").strip().lower()
+    replacements = {
+        "á": "a", "é": "e", "í": "i", "ó": "o", "ö": "o", "ő": "o",
+        "ú": "u", "ü": "u", "ű": "u",
+        "_": " ", "-": " ", ".": " ", "/": " "
+    }
+    for a, b in replacements.items():
+        txt = txt.replace(a, b)
+    return " ".join(txt.split())
+
+def auto_map_columns(df: pd.DataFrame, required_cols: List[str]) -> Dict[str, str]:
+    """Megpróbálja automatikusan standard oszlopokra mappelni a feltöltött Excel oszlopait."""
+    result = {}
+    normalized_existing = {_norm_col_name(c): c for c in df.columns}
+    for standard in required_cols:
+        candidates = [standard] + COLUMN_SYNONYMS.get(standard, [])
+        found = None
+        for cand in candidates:
+            n = _norm_col_name(cand)
+            if n in normalized_existing:
+                found = normalized_existing[n]
+                break
+        if found is None:
+            # részleges egyezés
+            for n_existing, original in normalized_existing.items():
+                if any(_norm_col_name(cand) in n_existing or n_existing in _norm_col_name(cand) for cand in candidates):
+                    found = original
+                    break
+        result[standard] = found
+    return result
+
+def find_sheet_by_hints(sheets: Dict[str, pd.DataFrame], role: str, fallback_index: int = 0) -> str:
+    hints = STANDARD_SHEET_HINTS.get(role, [])
+    lower = {str(k).lower(): k for k in sheets.keys()}
+    for sheet_lower, original in lower.items():
+        if any(h in sheet_lower for h in hints):
+            return original
+    names = list(sheets.keys())
+    return names[min(fallback_index, len(names)-1)]
+
+def standardize_with_mapping(df: pd.DataFrame, mapping: Dict[str, str], required_cols: List[str]) -> pd.DataFrame:
+    out = pd.DataFrame()
+    for standard in required_cols:
+        src = mapping.get(standard)
+        if src and src in df.columns:
+            out[standard] = df[src]
+        else:
+            out[standard] = np.nan
+    return out
+
+def render_mapper_ui(sheets: Dict[str, pd.DataFrame]):
+    """V9 mapper UI: eltérő szerkezetű Excel is feldolgozható."""
+    with st.expander("Excel Mapper / oszlop-standardizálás", expanded=False):
+        st.caption("Ha a céges Excel oszlopnevei eltérnek, itt megadható, melyik oszlop mit jelent. Az app ezután standard belső formára alakítja.")
+
+        sheet_names = list(sheets.keys())
+        default_prod_sheet = find_sheet_by_hints(sheets, "production", 0)
+        default_machine_sheet = find_sheet_by_hints(sheets, "machines", 1 if len(sheet_names) > 1 else 0)
+        default_product_sheet = find_sheet_by_hints(sheets, "products", 2 if len(sheet_names) > 2 else 0)
+        default_order_sheet = find_sheet_by_hints(sheets, "orders", 3 if len(sheet_names) > 3 else 0)
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            prod_sheet_name = st.selectbox("Termelés munkalap", sheet_names, index=sheet_names.index(default_prod_sheet), key="map_prod_sheet")
+        with c2:
+            machine_sheet_name = st.selectbox("Gépek munkalap", sheet_names, index=sheet_names.index(default_machine_sheet), key="map_machine_sheet")
+        with c3:
+            product_sheet_name = st.selectbox("Termékek munkalap", sheet_names, index=sheet_names.index(default_product_sheet), key="map_product_sheet")
+        with c4:
+            order_options = ["Nincs"] + sheet_names
+            order_index = order_options.index(default_order_sheet) if default_order_sheet in order_options else 0
+            order_sheet_name = st.selectbox("Megrendelések munkalap", order_options, index=order_index, key="map_order_sheet")
+
+        def build_mapping_block(title, df, required, key_prefix):
+            st.markdown(f"#### {title}")
+            auto = auto_map_columns(df, required)
+            mapping = {}
+            cols = ["Nincs"] + list(df.columns)
+            for i, standard in enumerate(required):
+                default = auto.get(standard)
+                idx = cols.index(default) if default in cols else 0
+                mapping[standard] = st.selectbox(
+                    f"{standard}",
+                    cols,
+                    index=idx,
+                    key=f"{key_prefix}_{standard}"
+                )
+                if mapping[standard] == "Nincs":
+                    mapping[standard] = None
+            return mapping
+
+        tab_m1, tab_m2, tab_m3, tab_m4 = st.tabs(["Termelés", "Gépek", "Termékek", "Megrendelések"])
+        with tab_m1:
+            prod_mapping = build_mapping_block("Termelés oszlopai", sheets[prod_sheet_name], REQUIRED_PROD_COLS, "map_prod")
+        with tab_m2:
+            machine_mapping = build_mapping_block("Gépek oszlopai", sheets[machine_sheet_name], REQUIRED_MACHINE_COLS, "map_machine")
+        with tab_m3:
+            product_mapping = build_mapping_block("Termékek oszlopai", sheets[product_sheet_name], REQUIRED_PRODUCT_COLS, "map_product")
+        with tab_m4:
+            if order_sheet_name == "Nincs":
+                st.info("Nincs megrendelés munkalap kiválasztva.")
+                order_mapping = None
+            else:
+                order_mapping = build_mapping_block("Megrendelések oszlopai", sheets[order_sheet_name], OPTIONAL_ORDER_COLS, "map_order")
+
+        prod_std = standardize_with_mapping(sheets[prod_sheet_name], prod_mapping, REQUIRED_PROD_COLS)
+        machines_std = standardize_with_mapping(sheets[machine_sheet_name], machine_mapping, REQUIRED_MACHINE_COLS)
+        products_std = standardize_with_mapping(sheets[product_sheet_name], product_mapping, REQUIRED_PRODUCT_COLS)
+        orders_std = None if order_sheet_name == "Nincs" or order_mapping is None else standardize_with_mapping(sheets[order_sheet_name], order_mapping, OPTIONAL_ORDER_COLS)
+
+        missing_main = []
+        for label, std_df, req in [("Termelés", prod_std, REQUIRED_PROD_COLS), ("Gépek", machines_std, REQUIRED_MACHINE_COLS), ("Termékek", products_std, REQUIRED_PRODUCT_COLS)]:
+            for col in req:
+                if std_df[col].isna().all():
+                    missing_main.append(f"{label}: {col}")
+
+        if missing_main:
+            st.warning("Ezeket az oszlopokat nem sikerült biztosan felismerni: " + ", ".join(missing_main))
+        else:
+            st.success("A kötelező oszlopokat sikerült standardizálni.")
+
+        return prod_std, machines_std, products_std, orders_std
+
+
 # ------------------------------------------------------------
 # Header
 # ------------------------------------------------------------
-st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V8</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V9</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="subtitle">Excelből működő ember–gép hatékonyság, OEE light, profitdiagnosztika és beosztási ajánlórendszer KKV-knak.</div>',
     unsafe_allow_html=True
@@ -1308,16 +1560,9 @@ if uploaded is None:
 # ------------------------------------------------------------
 try:
     sheets = safe_read_excel(uploaded)
-    prod_raw = find_sheet(sheets, ["Termeles", "Termelés"])
-    machines_raw = find_sheet(sheets, ["Gepek", "Gépek"])
-    products_raw = find_sheet(sheets, ["Termekek", "Termékek"])
 
-    # Opcionális: Megrendelesek / Megrendelések munkalap
-    orders_raw = None
-    for possible_order_sheet in ["Megrendelesek", "Megrendelések", "Rendelesek", "Rendelések"]:
-        if possible_order_sheet in sheets:
-            orders_raw = sheets[possible_order_sheet]
-            break
+    # V9: Excel Mapper - eltérő nevű oszlopok/munkalapok esetén is standardizál
+    prod_raw, machines_raw, products_raw, orders_raw = render_mapper_ui(sheets)
 
     validate_columns(prod_raw, REQUIRED_PROD_COLS, "Termeles")
     validate_columns(machines_raw, REQUIRED_MACHINE_COLS, "Gepek")
@@ -1387,6 +1632,11 @@ default_worker_plan = build_worker_machine_plan(default_plan_df, pair, unavailab
 default_fulfillment_df = build_order_fulfillment(default_plan_df, orders_df) if "orders_df" in globals() else pd.DataFrame()
 
 
+
+# V9: költséghatás és gyökérokelemzés
+impact_df = estimate_improvement_value(filtered)
+root_cause_recs = generate_root_cause_insights(filtered, pair, impact_df)
+
 # ------------------------------------------------------------
 # Tabok
 # ------------------------------------------------------------
@@ -1422,10 +1672,17 @@ with tabs[0]:
         show_kpi("Becsült profit", fmt_huf(profit), "Árbevétel - anyag - gépköltség")
 
     st.markdown("### Automatikus vezetői megállapítások")
-    render_recommendations(recs + (default_plan_recs if 'default_plan_recs' in globals() else []))
+    render_recommendations(recs + root_cause_recs + (default_plan_recs if 'default_plan_recs' in globals() else []))
+
+    st.markdown("### Becsült pénzügyi hatás / akciólista")
+    if impact_df.empty:
+        st.info("Nincs elég adat költséghatás-becsléshez.")
+    else:
+        st.dataframe(impact_df.head(8), use_container_width=True, hide_index=True)
+
 
     st.markdown("### Excel export")
-    overview_excel = build_excel_report(filtered, pair, assignment, default_plan_df, default_worker_plan, orders_df, default_fulfillment_df, default_capacity_df)
+    overview_excel = build_excel_report(filtered, pair, assignment, default_plan_df, default_worker_plan, orders_df, default_fulfillment_df, default_capacity_df, impact_df)
     st.download_button(
         "⬇️ Elemzési Excel riport letöltése",
         data=overview_excel,
@@ -1436,7 +1693,7 @@ with tabs[0]:
 
     st.markdown("### PDF export")
     if st.button("Vezetői PDF riport elkészítése", use_container_width=True):
-        pdf_bytes = build_pdf_report(filtered, pair, recs, assignment, default_plan_df, default_worker_plan, orders_df, default_fulfillment_df, default_capacity_df, default_plan_recs)
+        pdf_bytes = build_pdf_report(filtered, pair, recs, assignment, default_plan_df, default_worker_plan, orders_df, default_fulfillment_df, default_capacity_df, default_plan_recs, root_cause_recs, impact_df)
         if pdf_bytes is None:
             st.error("A PDF exporthoz telepíteni kell a reportlab csomagot.")
         else:
@@ -1606,7 +1863,7 @@ with tabs[5]:
 # ------------------------------------------------------------
 with tabs[6]:
     st.subheader("Gyártási terv szimulátor + dolgozói beosztás")
-    st.caption("V8: a tervezett db rendelésállományból, tervezési horizontból, gépórából és múltbeli termék-gép teljesítményből számolódik.")
+    st.caption("V9: a tervezett db rendelésállományból, tervezési horizontból, gépórából és múltbeli termék-gép teljesítményből számolódik.")
 
     if orders_df is not None and not orders_df.empty:
         st.success("Megrendelések munkalap felismerve: a tervezés rendelésállományból indul.")
@@ -1726,11 +1983,11 @@ with tabs[6]:
             st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("### 5. Export")
-    excel_bytes = build_excel_report(filtered, pair, assignment, plan_df, worker_plan, orders_df, fulfillment_df, capacity_df)
+    excel_bytes = build_excel_report(filtered, pair, assignment, plan_df, worker_plan, orders_df, fulfillment_df, capacity_df, impact_df)
     st.download_button(
-        "⬇️ V8 Excel riport letöltése",
+        "⬇️ V9 Excel riport letöltése",
         data=excel_bytes,
-        file_name="gyartasi_diagnosztika_v8_riport.xlsx",
+        file_name="gyartasi_diagnosztika_v9_riport.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
