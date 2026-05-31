@@ -20,7 +20,7 @@ except Exception:
 
 
 st.set_page_config(
-    page_title="Gyártási Diagnosztika V9",
+    page_title="Gyártási Diagnosztika V10",
     page_icon="🏭",
     layout="wide"
 )
@@ -326,6 +326,121 @@ def recommended_assignment(pair: pd.DataFrame) -> pd.DataFrame:
 
 
 
+
+def calculate_advisor_scores(df: pd.DataFrame, fulfillment_df: pd.DataFrame, capacity_df: pd.DataFrame, impact_df: pd.DataFrame) -> Dict[str, float]:
+    """V10 vezetői score-ok 0-100 skálán."""
+    if df is None or df.empty:
+        return {"Egészségpont": 0, "Kapacitáskockázat": 0, "Határidőkockázat": 0, "Profitveszteség_Ft": 0, "OEE": 0, "Selejt_%": 0}
+    avg_oee = float(df["OEE_light_%"].mean()) if "OEE_light_%" in df.columns else 0
+    total_qty = df["Gyártott_db"].sum() if "Gyártott_db" in df.columns else 0
+    scrap_pct = df["Selejt_db"].sum() / total_qty * 100 if total_qty else 0
+    capacity_risk = 0
+    if capacity_df is not None and not capacity_df.empty and "Kihasználtság_%" in capacity_df.columns:
+        max_util = float(capacity_df["Kihasználtság_%"].max())
+        capacity_risk = min(100, max(0, (max_util - 70) * 2.5))
+    deadline_risk = 0
+    if fulfillment_df is not None and not fulfillment_df.empty and "Teljesítés_%" in fulfillment_df.columns:
+        avg_fulfillment = float(fulfillment_df["Teljesítés_%"].mean())
+        deadline_risk = max(0, 100 - avg_fulfillment)
+    lost_profit = float(impact_df["Becsült_havi_hatás_Ft"].clip(lower=0).sum()) if impact_df is not None and not impact_df.empty and "Becsült_havi_hatás_Ft" in impact_df.columns else 0
+    health = avg_oee * 0.45 + max(0, 100 - scrap_pct * 10) * 0.25 + max(0, 100 - capacity_risk) * 0.15 + max(0, 100 - deadline_risk) * 0.15
+    return {"Egészségpont": round(max(0, min(100, health)), 1), "Kapacitáskockázat": round(max(0, min(100, capacity_risk)), 1), "Határidőkockázat": round(max(0, min(100, deadline_risk)), 1), "Profitveszteség_Ft": round(lost_profit, 0), "OEE": round(avg_oee, 1), "Selejt_%": round(scrap_pct, 2)}
+
+
+def score_label(value: float, inverse: bool = False) -> Tuple[str, str]:
+    try:
+        v = float(value)
+    except Exception:
+        v = 0
+    if inverse:
+        if v < 35: return "🟢 Alacsony", "success"
+        if v < 70: return "🟡 Közepes", "warning"
+        return "🔴 Magas", "danger"
+    if v >= 75: return "🟢 Jó", "success"
+    if v >= 50: return "🟡 Közepes", "warning"
+    return "🔴 Gyenge", "danger"
+
+
+def build_action_plan(df: pd.DataFrame, pair: pd.DataFrame, impact_df: pd.DataFrame, capacity_df: pd.DataFrame, fulfillment_df: pd.DataFrame) -> pd.DataFrame:
+    actions = []
+    if fulfillment_df is not None and not fulfillment_df.empty and "Hiány_db" in fulfillment_df.columns:
+        shortage = fulfillment_df[fulfillment_df["Hiány_db"] > 0].sort_values("Hiány_db", ascending=False)
+        if not shortage.empty:
+            r = shortage.iloc[0]
+            actions.append({"Prioritás":"Magas","Akció":f"Kapacitásbővítés vagy átütemezés a(z) {r['Termék']} termékre","Érintett":r["Termék"],"Miért?":f"{r['Hiány_db']:.0f} db hiány a tervben","Becsült_hatás":0})
+    if capacity_df is not None and not capacity_df.empty and "Kihasználtság_%" in capacity_df.columns:
+        bottleneck = capacity_df.sort_values("Kihasználtság_%", ascending=False).iloc[0]
+        if bottleneck["Kihasználtság_%"] >= 90:
+            actions.append({"Prioritás":"Magas","Akció":f"Szűk keresztmetszet kezelése: {bottleneck['Gép']}","Érintett":bottleneck["Gép"],"Miért?":f"{bottleneck['Kihasználtság_%']:.1f}% kapacitáskihasználtság","Becsült_hatás":0})
+    if impact_df is not None and not impact_df.empty:
+        med = impact_df["Becsült_havi_hatás_Ft"].median() if "Becsült_havi_hatás_Ft" in impact_df.columns else 0
+        for _, r in impact_df.head(4).iterrows():
+            actions.append({"Prioritás":"Magas" if r.get("Becsült_havi_hatás_Ft",0)>med else "Közepes","Akció":r.get("Javaslat","Beavatkozási pont vizsgálata"),"Érintett":r.get("Elem",""),"Miért?":r.get("Probléma",""),"Becsült_hatás":r.get("Becsült_havi_hatás_Ft",0)})
+    if pair is not None and not pair.empty:
+        for _, r in pair.sort_values("Kompatibilitási_pont", ascending=False).head(3).iterrows():
+            actions.append({"Prioritás":"Közepes","Akció":f"{r['Dolgozó']} kerüljön gyakrabban erre a gépre: {r['Gép']}","Érintett":f"{r['Dolgozó']} + {r['Gép']}","Miért?":f"Erős dolgozó-gép kompatibilitás: {r['Kompatibilitási_pont']:.0f} pont","Becsült_hatás":max(0, r.get("Profit/db",0))*100})
+    out=pd.DataFrame(actions)
+    if out.empty: return out
+    order={"Magas":0,"Közepes":1,"Alacsony":2}
+    out["_sort"]=out["Prioritás"].map(order).fillna(9)
+    return out.sort_values(["_sort","Becsült_hatás"],ascending=[True,False]).drop(columns=["_sort"]).head(8)
+
+
+def build_heatmap_symbols(matrix: pd.DataFrame) -> pd.DataFrame:
+    if matrix is None or matrix.empty: return pd.DataFrame()
+    def sym(v):
+        try: x=float(v)
+        except Exception: return "⚪"
+        if x>=80: return "🟢"
+        if x>=65: return "🟡"
+        if x>0: return "🔴"
+        return "⚪"
+    return matrix.applymap(sym)
+
+
+def simulate_what_if(df: pd.DataFrame, fulfillment_df: pd.DataFrame, capacity_df: pd.DataFrame, impact_df: pd.DataFrame, extra_capacity_pct: float=0, scrap_reduction_pct: float=0, oee_improvement_pct: float=0) -> pd.DataFrame:
+    base_profit=float(df["Becsült_profit"].sum()) if df is not None and not df.empty and "Becsült_profit" in df.columns else 0
+    total_qty=float(df["Gyártott_db"].sum()) if df is not None and not df.empty and "Gyártott_db" in df.columns else 0
+    scrap_qty=float(df["Selejt_db"].sum()) if df is not None and not df.empty and "Selejt_db" in df.columns else 0
+    avg_profit_per_good=float(df["Becsült_profit"].sum()/max(df["Jó_db"].sum(),1)) if df is not None and not df.empty and "Jó_db" in df.columns else 0
+    cap_gain=total_qty*(extra_capacity_pct/100)*avg_profit_per_good*0.4
+    oee_gain=total_qty*(oee_improvement_pct/100)*avg_profit_per_good*0.5
+    scrap_gain=scrap_qty*(scrap_reduction_pct/100)*max(avg_profit_per_good,0)
+    shortage_before=fulfillment_df["Hiány_db"].sum() if fulfillment_df is not None and not fulfillment_df.empty and "Hiány_db" in fulfillment_df.columns else 0
+    shortage_after=max(0, shortage_before*(1-(extra_capacity_pct+oee_improvement_pct)/100))
+    return pd.DataFrame([
+        {"Mutató":"Becsült profit jelenleg","Érték":base_profit},
+        {"Mutató":"Kapacitásnövelés becsült hatása","Érték":cap_gain},
+        {"Mutató":"OEE-javulás becsült hatása","Érték":oee_gain},
+        {"Mutató":"Selejtcsökkentés becsült hatása","Érték":scrap_gain},
+        {"Mutató":"Becsült profit what-if után","Érték":base_profit+cap_gain+oee_gain+scrap_gain},
+        {"Mutató":"Hiány előtte db","Érték":shortage_before},
+        {"Mutató":"Hiány what-if után db","Érték":shortage_after},
+    ])
+
+
+def make_pdf_action_card(action, width=500):
+    pr=str(action.get("Prioritás","Közepes"))
+    color="#dc2626" if pr=="Magas" else "#f59e0b" if pr=="Közepes" else "#16a34a"
+    bg="#fee2e2" if pr=="Magas" else "#fef3c7" if pr=="Közepes" else "#dcfce7"
+    text=f"<b>{pdf_safe_text(action.get('Akció',''))}</b><br/>{pdf_safe_text(action.get('Miért?',''))}<br/><b>Becsült hatás:</b> {fmt_huf(action.get('Becsült_hatás',0))}"
+    t=Table([[Paragraph(pr, ParagraphStyle("Pr", fontSize=9, textColor=colors.HexColor(color), alignment=1)), Paragraph(text, ParagraphStyle("Act", fontSize=8.5, leading=11, textColor=colors.HexColor("#0f172a")))]], colWidths=[2.2*cm, width-2.2*cm])
+    t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),colors.HexColor(bg)),("BOX",(0,0),(-1,-1),0.5,colors.HexColor(color)),("LINEBEFORE",(0,0),(0,-1),5,colors.HexColor(color)),("VALIGN",(0,0),(-1,-1),"TOP"),("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7)]))
+    return t
+
+
+def make_pdf_symbol_matrix(symbol_df: pd.DataFrame, width=500):
+    if symbol_df is None or symbol_df.empty:
+        return Paragraph("Nincs dolgozó-gép mátrix adat.", ParagraphStyle("Empty", fontSize=8))
+    data=[["Dolgozó"]+list(symbol_df.columns)]
+    for idx,row in symbol_df.head(10).iterrows():
+        data.append([str(idx)]+[str(v) for v in row.tolist()])
+    col_width=width/max(len(data[0]),1)
+    t=Table(data, colWidths=[col_width]*len(data[0]))
+    t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#0f172a")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),0.25,colors.HexColor("#cbd5e1")),("ALIGN",(1,1),(-1,-1),"CENTER"),("BACKGROUND",(0,1),(-1,-1),colors.HexColor("#f8fafc")),("FONTSIZE",(0,0),(-1,-1),8)]))
+    return t
+
+
 def pdf_safe_text(value):
     """ReportLab alap fontokhoz biztonságos, ékezet-kímélő szöveg."""
     return (
@@ -474,9 +589,12 @@ def build_pdf_report(
     capacity_df: pd.DataFrame = None,
     plan_recs: List[Tuple[str, str]] = None,
     root_cause_recs: List[Tuple[str, str]] = None,
-    impact_df: pd.DataFrame = None
+    impact_df: pd.DataFrame = None,
+    advisor_scores: Dict[str, float] = None,
+    action_plan_df: pd.DataFrame = None,
+    symbol_matrix: pd.DataFrame = None
 ) -> bytes:
-    """V9: vizuális, prezentációsabb vezetői PDF riport."""
+    """V10: vizuális, prezentációsabb vezetői PDF riport."""
     if SimpleDocTemplate is None:
         return None
 
@@ -529,7 +647,7 @@ def build_pdf_report(
     profit = df["Becsült_profit"].sum()
 
     story = []
-    story.append(P("Gyártási Diagnosztika V9 - executive riport", title))
+    story.append(P("Gyártási Diagnosztika V10 - executive riport", title))
     story.append(P("Probléma → ok → javasolt akció → becsült hatás logikájú vezetői összefoglaló.", body))
     story.append(Spacer(1, 0.25 * cm))
 
@@ -568,6 +686,15 @@ def build_pdf_report(
     story.append(table)
     story.append(Spacer(1, 0.25 * cm))
 
+    if advisor_scores:
+        story.append(P("Executive Summary", h2))
+        score_table = Table([[make_pdf_gauge("Egészségpont", advisor_scores.get("Egészségpont", 0), ""), make_pdf_gauge("Kapacitáskockázat", advisor_scores.get("Kapacitáskockázat", 0), "", inverse=True), make_pdf_gauge("Határidőkockázat", advisor_scores.get("Határidőkockázat", 0), "", inverse=True)]], colWidths=[5.5 * cm, 5.5 * cm, 5.5 * cm])
+        score_table.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP"), ("ALIGN", (0,0), (-1,-1), "CENTER")]))
+        story.append(score_table)
+        story.append(Spacer(1, 0.18 * cm))
+        story.append(pdf_insight_card(f"Becsült havi javítási potenciál: {fmt_huf(advisor_scores.get('Profitveszteség_Ft', 0))}", "success"))
+        story.append(Spacer(1, 0.18 * cm))
+
     # Insight cards
     story.append(P("Fő megállapítások", h2))
     for cls, text in (recs or [])[:4]:
@@ -585,6 +712,18 @@ def build_pdf_report(
     if impact_df is not None and not impact_df.empty:
         top_impact = impact_df.head(5).copy()
         story.append(make_pdf_bar_chart("Becsült javítási potenciál", top_impact, "Elem", "Becsült_havi_hatás_Ft", " Ft", width=520, height=150, top_n=5))
+        story.append(Spacer(1, 0.15 * cm))
+
+    if action_plan_df is not None and not action_plan_df.empty:
+        story.append(P("Mit csináljak holnap? - Top akciók", h2))
+        for _, act in action_plan_df.head(5).iterrows():
+            story.append(make_pdf_action_card(act))
+            story.append(Spacer(1, 0.08 * cm))
+
+    if symbol_matrix is not None and not symbol_matrix.empty:
+        story.append(P("Dolgozó-gép hőtérkép", h2))
+        story.append(P("Zöld = erős párosítás, sárga = közepes, piros = kerülendő / fejlesztendő.", body))
+        story.append(make_pdf_symbol_matrix(symbol_matrix, width=500))
         story.append(Spacer(1, 0.15 * cm))
 
     story.append(Spacer(1, 0.15 * cm))
@@ -829,7 +968,7 @@ def build_order_level_plan(
     hours_per_machine_day: float = 8.0,
     unavailable_machines: List[str] = None
 ) -> pd.DataFrame:
-    """V9: rendelésalapú gyártási terv.
+    """V10: rendelésalapú gyártási terv.
 
     A Tervezett_db nem önálló becslés: az Igényelt_db-ből indul,
     majd a tervezési horizont, a gépórák, a gépenkénti kapacitás és a
@@ -961,7 +1100,7 @@ def build_order_level_plan(
 
 
 def build_order_fulfillment_v7(plan_df: pd.DataFrame, orders_df: pd.DataFrame = None, manual_demand: Dict[str, int] = None) -> pd.DataFrame:
-    """Rendelés/igény teljesítés termékszinten, V9 logikával."""
+    """Rendelés/igény teljesítés termékszinten, V10 logikával."""
     if plan_df is None or plan_df.empty:
         return pd.DataFrame()
 
@@ -1027,7 +1166,7 @@ def generate_plan_insights_v7(plan_df: pd.DataFrame, fulfillment_df: pd.DataFram
     active = plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])].copy()
     total_planned = active["Tervezett_db"].sum() if not active.empty else 0
     total_profit = active["Becsült_profit"].sum() if not active.empty else 0
-    recs.append(("success", f"A V9 terv {fmt_num(total_planned)} db gyártást és kb. {fmt_huf(total_profit)} becsült profitot mutat."))
+    recs.append(("success", f"A V10 terv {fmt_num(total_planned)} db gyártást és kb. {fmt_huf(total_profit)} becsült profitot mutat."))
 
     if fulfillment_df is not None and not fulfillment_df.empty:
         shortage = fulfillment_df["Hiány_db"].sum()
@@ -1336,7 +1475,7 @@ def estimate_improvement_value(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def generate_root_cause_insights(df: pd.DataFrame, pair: pd.DataFrame, impact_df: pd.DataFrame) -> List[Tuple[str, str]]:
-    """V9 szabályalapú, AI-szerű gyökérokelemzés."""
+    """V10 szabályalapú, AI-szerű gyökérokelemzés."""
     recs = []
     if df is None or df.empty:
         return recs
@@ -1371,7 +1510,7 @@ def generate_root_cause_insights(df: pd.DataFrame, pair: pd.DataFrame, impact_df
 
 
 # ------------------------------------------------------------
-# V9 Excel Mapper / standardizáló réteg
+# V10 Excel Mapper / standardizáló réteg
 # ------------------------------------------------------------
 STANDARD_SHEET_HINTS = {
     "production": ["termeles", "termelés", "production", "gyartas", "gyártás", "data", "adat", "riport"],
@@ -1455,7 +1594,7 @@ def standardize_with_mapping(df: pd.DataFrame, mapping: Dict[str, str], required
     return out
 
 def render_mapper_ui(sheets: Dict[str, pd.DataFrame]):
-    """V9 mapper UI: eltérő szerkezetű Excel is feldolgozható."""
+    """V10 mapper UI: eltérő szerkezetű Excel is feldolgozható."""
     with st.expander("Excel Mapper / oszlop-standardizálás", expanded=False):
         st.caption("Ha a céges Excel oszlopnevei eltérnek, itt megadható, melyik oszlop mit jelent. Az app ezután standard belső formára alakítja.")
 
@@ -1531,7 +1670,7 @@ def render_mapper_ui(sheets: Dict[str, pd.DataFrame]):
 # ------------------------------------------------------------
 # Header
 # ------------------------------------------------------------
-st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V9</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V10</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="subtitle">Excelből működő ember–gép hatékonyság, OEE light, profitdiagnosztika és beosztási ajánlórendszer KKV-knak.</div>',
     unsafe_allow_html=True
@@ -1561,7 +1700,7 @@ if uploaded is None:
 try:
     sheets = safe_read_excel(uploaded)
 
-    # V9: Excel Mapper - eltérő nevű oszlopok/munkalapok esetén is standardizál
+    # V10: Excel Mapper - eltérő nevű oszlopok/munkalapok esetén is standardizál
     prod_raw, machines_raw, products_raw, orders_raw = render_mapper_ui(sheets)
 
     validate_columns(prod_raw, REQUIRED_PROD_COLS, "Termeles")
@@ -1633,9 +1772,15 @@ default_fulfillment_df = build_order_fulfillment(default_plan_df, orders_df) if 
 
 
 
-# V9: költséghatás és gyökérokelemzés
+# V10: költséghatás és gyökérokelemzés
 impact_df = estimate_improvement_value(filtered)
 root_cause_recs = generate_root_cause_insights(filtered, pair, impact_df)
+
+
+# V10: Digital Production Advisor mutatók
+advisor_scores = calculate_advisor_scores(default_plan_df if 'default_plan_df' in globals() and not default_plan_df.empty else filtered, default_fulfillment_df, default_capacity_df, impact_df)
+action_plan_df = build_action_plan(filtered, pair, impact_df, default_capacity_df, default_fulfillment_df)
+symbol_matrix = build_heatmap_symbols(matrix)
 
 # ------------------------------------------------------------
 # Tabok
@@ -1648,8 +1793,9 @@ tabs = st.tabs([
     "5. Termék / profit",
     "6. Ajánlórendszer",
     "7. Gyártási terv + beosztás",
-    "8. Megrendelések",
-    "9. Adatellenőrzés"
+    "8. Digital Advisor",
+    "9. Megrendelések",
+    "10. Adatellenőrzés"
 ])
 
 
@@ -1680,6 +1826,23 @@ with tabs[0]:
     else:
         st.dataframe(impact_df.head(8), use_container_width=True, hide_index=True)
 
+    st.markdown("### Digital Advisor összefoglaló")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        show_kpi("Egészségpont", f"{advisor_scores.get('Egészségpont', 0):.1f}/100", score_label(advisor_scores.get("Egészségpont", 0))[0])
+    with c2:
+        show_kpi("Kapacitáskockázat", f"{advisor_scores.get('Kapacitáskockázat', 0):.1f}/100", score_label(advisor_scores.get("Kapacitáskockázat", 0), inverse=True)[0])
+    with c3:
+        show_kpi("Határidőkockázat", f"{advisor_scores.get('Határidőkockázat', 0):.1f}/100", score_label(advisor_scores.get("Határidőkockázat", 0), inverse=True)[0])
+    with c4:
+        show_kpi("Javítási potenciál", fmt_huf(advisor_scores.get("Profitveszteség_Ft", 0)), "Becsült havi érték")
+
+    st.markdown("### Mit csinálnék holnap?")
+    if action_plan_df.empty:
+        st.info("Nincs elég adat akciólista készítéséhez.")
+    else:
+        st.dataframe(action_plan_df.head(5), use_container_width=True, hide_index=True)
+
 
     st.markdown("### Excel export")
     overview_excel = build_excel_report(filtered, pair, assignment, default_plan_df, default_worker_plan, orders_df, default_fulfillment_df, default_capacity_df, impact_df)
@@ -1693,7 +1856,7 @@ with tabs[0]:
 
     st.markdown("### PDF export")
     if st.button("Vezetői PDF riport elkészítése", use_container_width=True):
-        pdf_bytes = build_pdf_report(filtered, pair, recs, assignment, default_plan_df, default_worker_plan, orders_df, default_fulfillment_df, default_capacity_df, default_plan_recs, root_cause_recs, impact_df)
+        pdf_bytes = build_pdf_report(filtered, pair, recs, assignment, default_plan_df, default_worker_plan, orders_df, default_fulfillment_df, default_capacity_df, default_plan_recs, root_cause_recs, impact_df, advisor_scores, action_plan_df, symbol_matrix)
         if pdf_bytes is None:
             st.error("A PDF exporthoz telepíteni kell a reportlab csomagot.")
         else:
@@ -1863,7 +2026,7 @@ with tabs[5]:
 # ------------------------------------------------------------
 with tabs[6]:
     st.subheader("Gyártási terv szimulátor + dolgozói beosztás")
-    st.caption("V9: a tervezett db rendelésállományból, tervezési horizontból, gépórából és múltbeli termék-gép teljesítményből számolódik.")
+    st.caption("V10: a tervezett db rendelésállományból, tervezési horizontból, gépórából és múltbeli termék-gép teljesítményből számolódik.")
 
     if orders_df is not None and not orders_df.empty:
         st.success("Megrendelések munkalap felismerve: a tervezés rendelésállományból indul.")
@@ -1985,9 +2148,9 @@ with tabs[6]:
     st.markdown("### 5. Export")
     excel_bytes = build_excel_report(filtered, pair, assignment, plan_df, worker_plan, orders_df, fulfillment_df, capacity_df, impact_df)
     st.download_button(
-        "⬇️ V9 Excel riport letöltése",
+        "⬇️ V10 Excel riport letöltése",
         data=excel_bytes,
-        file_name="gyartasi_diagnosztika_v9_riport.xlsx",
+        file_name="gyartasi_diagnosztika_v10_riport.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
@@ -1998,10 +2161,57 @@ with tabs[6]:
 
 
 
+
+# ------------------------------------------------------------
+# 8. Digital Advisor / What-if
+# ------------------------------------------------------------
+with tabs[7]:
+    st.subheader("Digital Production Advisor")
+    st.caption("V10: vezetői egészségpont, akciólista, dolgozó-gép hőtérkép és mi történik ha szimuláció.")
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        show_kpi("Termelési egészségpont", f"{advisor_scores.get('Egészségpont', 0):.1f}/100", score_label(advisor_scores.get("Egészségpont", 0))[0])
+    with c2:
+        show_kpi("Kapacitáskockázat", f"{advisor_scores.get('Kapacitáskockázat', 0):.1f}/100", score_label(advisor_scores.get("Kapacitáskockázat", 0), inverse=True)[0])
+    with c3:
+        show_kpi("Határidőkockázat", f"{advisor_scores.get('Határidőkockázat', 0):.1f}/100", score_label(advisor_scores.get("Határidőkockázat", 0), inverse=True)[0])
+    with c4:
+        show_kpi("Becsült javítási potenciál", fmt_huf(advisor_scores.get("Profitveszteség_Ft", 0)), "Havi becslés")
+
+    st.markdown("### Top vezetői akciólista")
+    if action_plan_df.empty:
+        st.info("Nincs elég adat akciólista készítéséhez.")
+    else:
+        st.dataframe(action_plan_df, use_container_width=True, hide_index=True)
+
+    st.markdown("### Dolgozó–gép hőtérkép")
+    st.caption("🟢 erős párosítás, 🟡 közepes, 🔴 gyenge / kerülendő")
+    if symbol_matrix.empty:
+        st.info("Nincs mátrixadat.")
+    else:
+        st.dataframe(symbol_matrix, use_container_width=True)
+
+    st.markdown("### Mi történik ha? szimulátor")
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        extra_capacity = st.slider("+ kapacitás %", 0, 50, 10, step=5)
+    with s2:
+        scrap_reduction = st.slider("Selejtcsökkentés %", 0, 50, 10, step=5)
+    with s3:
+        oee_improve = st.slider("OEE javulás %", 0, 30, 5, step=5)
+
+    whatif_df = simulate_what_if(filtered, default_fulfillment_df, default_capacity_df, impact_df, extra_capacity_pct=extra_capacity, scrap_reduction_pct=scrap_reduction, oee_improvement_pct=oee_improve)
+    st.dataframe(whatif_df, use_container_width=True, hide_index=True)
+
+    fig = px.bar(whatif_df[whatif_df["Mutató"].isin(["Becsült profit jelenleg", "Becsült profit what-if után"])], x="Mutató", y="Érték", title="Profit what-if becslés")
+    st.plotly_chart(fig, use_container_width=True)
+
+
 # ------------------------------------------------------------
 # 8. Megrendelések
 # ------------------------------------------------------------
-with tabs[7]:
+with tabs[8]:
     st.subheader("Megrendelésállomány")
     st.caption("Opcionális munkalap: Megrendelesek. Ha feltöltöd, a gyártási terv automatikusan ebből indul.")
 
@@ -2029,7 +2239,7 @@ with tabs[7]:
 # ------------------------------------------------------------
 # 7. Adatellenőrzés
 # ------------------------------------------------------------
-with tabs[8]:
+with tabs[9]:
     st.subheader("Adatellenőrzés")
     st.markdown("### Feldolgozott adatok")
     st.dataframe(filtered.head(500), use_container_width=True, hide_index=True)
