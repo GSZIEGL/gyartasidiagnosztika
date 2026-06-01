@@ -1,4 +1,14 @@
 
+def safe_completion_pct(planned, demand):
+    """Pandas/NumPy kompatibilis teljesítési százalék 0-100 között."""
+    planned_s = pd.to_numeric(planned, errors="coerce").fillna(0)
+    demand_s = pd.to_numeric(demand, errors="coerce").fillna(0)
+    pct = pd.Series(0.0, index=demand_s.index)
+    mask = demand_s > 0
+    pct.loc[mask] = planned_s.loc[mask] / demand_s.loc[mask] * 100
+    return pct.clip(lower=0, upper=100).round(1)
+
+
 import io
 from typing import Dict, List, Tuple
 
@@ -20,7 +30,7 @@ except Exception:
 
 
 st.set_page_config(
-    page_title="Gyártási Diagnosztika V10.5.5.4.4.3.3.2.2",
+    page_title="Gyártási Diagnosztika V10.6.5.4.4.3.3.2.2",
     page_icon="🏭",
     layout="wide"
 )
@@ -219,7 +229,7 @@ def prepare_data(prod: pd.DataFrame, machines: pd.DataFrame, products: pd.DataFr
     df["Árbevétel"] = df["Jó_db"] * df["Eladási_ár"]
     df["Anyagköltség_össz"] = df["Gyártott_db"] * df["Anyagköltség"]
 
-    # V10.5: gépköltség korrekció.
+    # V10.6: gépköltség korrekció.
     # Korábban minden sorra teljes óradíj ment, ami irreálisan negatív profitot okozhatott.
     df["Becsült_gépóra"] = np.where(
         df["Kapacitás_db_óra"] > 0,
@@ -344,7 +354,7 @@ def recommended_assignment(pair: pd.DataFrame) -> pd.DataFrame:
 
 
 def calculate_advisor_scores(df: pd.DataFrame, fulfillment_df: pd.DataFrame, capacity_df: pd.DataFrame, impact_df: pd.DataFrame) -> Dict[str, float]:
-    """V10.5.4.3.2 vezetői score-ok 0-100 skálán."""
+    """V10.6.4.3.2 vezetői score-ok 0-100 skálán."""
     if df is None or df.empty:
         return {"Egészségpont": 0, "Kapacitáskockázat": 0, "Határidőkockázat": 0, "Profitveszteség_Ft": 0, "OEE": 0, "Selejt_%": 0}
     avg_oee = float(df["OEE_light_%"].mean()) if "OEE_light_%" in df.columns else 0
@@ -533,7 +543,7 @@ def build_top_critical_orders(orders_df: pd.DataFrame, plan_df: pd.DataFrame) ->
     out = out.merge(planned_by_order, on="Rendelés_ID", how="left")
     out["Tervezett_db"] = out["Tervezett_db"].fillna(0)
     out["Hiány_db"] = (out["Rendelt_db"] - out["Tervezett_db"]).clip(lower=0)
-    out["Teljesítés_%"] = np.minimum(np.where(out["Rendelt_db"] > 0, out["Tervezett_db"] / out["Rendelt_db"] * 100, 0), 100).round(1)
+    out["Teljesítés_%"] = safe_completion_pct(out["Tervezett_db"], out["Rendelt_db"])
     out["Kritikusság"] = (100 - out["Teljesítés_%"]) + (6 - out["Prioritás"].clip(1,5)) * 10
     return out.sort_values(["Kritikusság", "Határidő"], ascending=[False, True]).head(10)
 
@@ -645,13 +655,13 @@ def summarize_plan_by_product(plan_df: pd.DataFrame, fulfillment_df: pd.DataFram
     if fulfillment_df is not None and not fulfillment_df.empty:
         out = fulfillment_df.copy()
         if "Teljesítés_%" not in out.columns:
-            out["Teljesítés_%"] = np.minimum(np.where(out["Igényelt_db"] > 0, out["Tervezett_db"] / out["Igényelt_db"] * 100, 0), 100).round(1)
+            out["Teljesítés_%"] = safe_completion_pct(out["Tervezett_db"], out["Igényelt_db"])
     elif plan_df is not None and not plan_df.empty:
         planned = plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])].groupby("Termék", as_index=False).agg(Tervezett_db=("Tervezett_db", "sum"))
         shortage = plan_df[plan_df["Gép"].eq("Kapacitáshiány")].groupby("Termék", as_index=False).agg(Hiány_db=("Tervezett_db", "sum"))
         out = planned.merge(shortage, on="Termék", how="outer").fillna(0)
         out["Igényelt_db"] = out["Tervezett_db"] + out["Hiány_db"]
-        out["Teljesítés_%"] = np.minimum(np.where(out["Igényelt_db"] > 0, out["Tervezett_db"] / out["Igényelt_db"] * 100, 0), 100).round(1)
+        out["Teljesítés_%"] = safe_completion_pct(out["Tervezett_db"], out["Igényelt_db"])
     else:
         return pd.DataFrame()
 
@@ -908,7 +918,7 @@ def build_pdf_report(
     lost_revenue_df: pd.DataFrame = None,
     critical_orders_df: pd.DataFrame = None
 ) -> bytes:
-    """V10.5.4.3.2: vizuális, prezentációsabb vezetői PDF riport."""
+    """V10.6.4.3.2: vizuális, prezentációsabb vezetői PDF riport."""
     if SimpleDocTemplate is None:
         return None
 
@@ -961,7 +971,7 @@ def build_pdf_report(
     profit = df["Becsült_profit"].sum()
 
     story = []
-    story.append(P("Gyártási Diagnosztika V10.5.5.4.4.3.3.2.2 - executive riport", title))
+    story.append(P("Gyártási Diagnosztika V10.6.5.4.4.3.3.2.2 - executive riport", title))
     story.append(P("Probléma → ok → javasolt akció → becsült hatás logikájú vezetői összefoglaló.", body))
     story.append(Spacer(1, 0.25 * cm))
 
@@ -1245,7 +1255,7 @@ def build_order_fulfillment(plan_df: pd.DataFrame, orders_df: pd.DataFrame) -> p
         demand["Tervezett_db"] = demand["Tervezett_db"].fillna(0)
 
     demand["Hiány_db"] = (demand["Rendelt_db"] - demand["Tervezett_db"]).clip(lower=0)
-    demand["Teljesítés_%"] = np.minimum(np.where(demand["Rendelt_db"] > 0, demand["Tervezett_db"] / demand["Rendelt_db"] * 100, 0), 100).round(1)
+    demand["Teljesítés_%"] = safe_completion_pct(demand["Tervezett_db"], demand["Rendelt_db"])
     return demand.sort_values("Teljesítés_%")
 
 
@@ -1312,7 +1322,7 @@ def build_order_level_plan(
     hours_per_machine_day: float = 8.0,
     unavailable_machines: List[str] = None
 ) -> pd.DataFrame:
-    """V10.5.4.3.2: rendelésalapú gyártási terv.
+    """V10.6.4.3.2: rendelésalapú gyártási terv.
 
     A Tervezett_db nem önálló becslés: az Igényelt_db-ből indul,
     majd a tervezési horizont, a gépórák, a gépenkénti kapacitás és a
@@ -1444,7 +1454,7 @@ def build_order_level_plan(
 
 
 def build_order_fulfillment_v7(plan_df: pd.DataFrame, orders_df: pd.DataFrame = None, manual_demand: Dict[str, int] = None) -> pd.DataFrame:
-    """Rendelés/igény teljesítés termékszinten, V10.5.4.3.2 logikával."""
+    """Rendelés/igény teljesítés termékszinten, V10.6.4.3.2 logikával."""
     if plan_df is None or plan_df.empty:
         return pd.DataFrame()
 
@@ -1466,10 +1476,7 @@ def build_order_fulfillment_v7(plan_df: pd.DataFrame, orders_df: pd.DataFrame = 
     out = demand.merge(planned, on="Termék", how="left")
     out["Tervezett_db"] = out["Tervezett_db"].fillna(0)
     out["Hiány_db"] = (out["Igényelt_db"] - out["Tervezett_db"]).clip(lower=0)
-    out["Teljesítés_%"] = np.minimum(
-        np.where(out["Igényelt_db"] > 0, out["Tervezett_db"] / out["Igényelt_db"] * 100, 0),
-        100
-    ).round(1)
+    out["Teljesítés_%"] = safe_completion_pct(out["Tervezett_db"], out["Igényelt_db"])
     return out.sort_values("Teljesítés_%")
 
 
@@ -1510,7 +1517,7 @@ def generate_plan_insights_v7(plan_df: pd.DataFrame, fulfillment_df: pd.DataFram
     active = plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])].copy()
     total_planned = active["Tervezett_db"].sum() if not active.empty else 0
     total_profit = active["Becsült_profit"].sum() if not active.empty else 0
-    recs.append(("success", f"A V10.5.4.3.2 terv {fmt_num(total_planned)} db gyártást és kb. {fmt_huf(total_profit)} becsült profitot mutat."))
+    recs.append(("success", f"A V10.6.4.3.2 terv {fmt_num(total_planned)} db gyártást és kb. {fmt_huf(total_profit)} becsült profitot mutat."))
 
     if fulfillment_df is not None and not fulfillment_df.empty:
         shortage = fulfillment_df["Hiány_db"].sum()
@@ -1777,7 +1784,7 @@ def render_recommendations(recs: List[Tuple[str, str]]):
 
 
 def estimate_improvement_value(df: pd.DataFrame) -> pd.DataFrame:
-    """V10.5.4.3 költség/profit hatásbecslés.
+    """V10.6.4.3 költség/profit hatásbecslés.
 
     Korábbi verzióban sokszor 0 Ft lett, mert Profit/db több helyzetben 0 vagy negatív.
     Itt inkább fedezeti értékkel számolunk:
@@ -1876,7 +1883,7 @@ def estimate_improvement_value(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def generate_root_cause_insights(df: pd.DataFrame, pair: pd.DataFrame, impact_df: pd.DataFrame) -> List[Tuple[str, str]]:
-    """V10.5.4.3.2 szabályalapú, AI-szerű gyökérokelemzés."""
+    """V10.6.4.3.2 szabályalapú, AI-szerű gyökérokelemzés."""
     recs = []
     if df is None or df.empty:
         return recs
@@ -1911,7 +1918,7 @@ def generate_root_cause_insights(df: pd.DataFrame, pair: pd.DataFrame, impact_df
 
 
 # ------------------------------------------------------------
-# V10.5.4.3.2 Excel Mapper / standardizáló réteg
+# V10.6.4.3.2 Excel Mapper / standardizáló réteg
 # ------------------------------------------------------------
 STANDARD_SHEET_HINTS = {
     "production": ["termeles", "termelés", "production", "gyartas", "gyártás", "data", "adat", "riport"],
@@ -1995,7 +2002,7 @@ def standardize_with_mapping(df: pd.DataFrame, mapping: Dict[str, str], required
     return out
 
 def render_mapper_ui(sheets: Dict[str, pd.DataFrame]):
-    """V10.5.4.3.2 mapper UI: eltérő szerkezetű Excel is feldolgozható."""
+    """V10.6.4.3.2 mapper UI: eltérő szerkezetű Excel is feldolgozható."""
     with st.expander("Excel Mapper / oszlop-standardizálás", expanded=False):
         st.caption("Ha a céges Excel oszlopnevei eltérnek, itt megadható, melyik oszlop mit jelent. Az app ezután standard belső formára alakítja.")
 
@@ -2071,7 +2078,7 @@ def render_mapper_ui(sheets: Dict[str, pd.DataFrame]):
 # ------------------------------------------------------------
 # Header
 # ------------------------------------------------------------
-st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V10.5.5.4.4.3.3.2.2</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika V10.6.5.4.4.3.3.2.2</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="subtitle">Excelből működő ember–gép hatékonyság, OEE light, profitdiagnosztika és beosztási ajánlórendszer KKV-knak.</div>',
     unsafe_allow_html=True
@@ -2101,7 +2108,7 @@ if uploaded is None:
 try:
     sheets = safe_read_excel(uploaded)
 
-    # V10.5.4.3.2: Excel Mapper - eltérő nevű oszlopok/munkalapok esetén is standardizál
+    # V10.6.4.3.2: Excel Mapper - eltérő nevű oszlopok/munkalapok esetén is standardizál
     prod_raw, machines_raw, products_raw, orders_raw = render_mapper_ui(sheets)
 
     validate_columns(prod_raw, REQUIRED_PROD_COLS, "Termeles")
@@ -2173,18 +2180,18 @@ default_fulfillment_df = build_order_fulfillment(default_plan_df, orders_df) if 
 
 
 
-# V10.5.4.3.2: költséghatás és gyökérokelemzés
+# V10.6.4.3.2: költséghatás és gyökérokelemzés
 impact_df = estimate_improvement_value(filtered)
 root_cause_recs = generate_root_cause_insights(filtered, pair, impact_df)
 
 
-# V10.5.4.3.2: Digital Production Advisor mutatók
+# V10.6.4.3.2: Digital Production Advisor mutatók
 advisor_scores = calculate_advisor_scores(default_plan_df if 'default_plan_df' in globals() and not default_plan_df.empty else filtered, default_fulfillment_df, default_capacity_df, impact_df)
 action_plan_df = build_action_plan(filtered, pair, impact_df, default_capacity_df, default_fulfillment_df)
 symbol_matrix = build_heatmap_symbols(matrix)
 
 
-# V10.5: ok-okozati lánc és rendelés/hiány pénzügyi összekötés
+# V10.6: ok-okozati lánc és rendelés/hiány pénzügyi összekötés
 default_fulfillment_summary = summarize_plan_by_product(default_plan_df, default_fulfillment_df) if "default_plan_df" in globals() else pd.DataFrame()
 lost_revenue_df = estimate_lost_revenue_by_product(default_fulfillment_summary, df=filtered)
 causal_chain_df = build_causal_chain(default_plan_df, default_fulfillment_df, pair, default_capacity_df, filtered) if "default_plan_df" in globals() else pd.DataFrame()
@@ -2446,7 +2453,7 @@ with tabs[5]:
 # ------------------------------------------------------------
 with tabs[6]:
     st.subheader("Gyártási terv szimulátor + dolgozói beosztás")
-    st.caption("V10.5.4.3.2: a tervezett db rendelésállományból, tervezési horizontból, gépórából és múltbeli termék-gép teljesítményből számolódik.")
+    st.caption("V10.6.4.3.2: a tervezett db rendelésállományból, tervezési horizontból, gépórából és múltbeli termék-gép teljesítményből számolódik.")
 
     if orders_df is not None and not orders_df.empty:
         st.success("Megrendelések munkalap felismerve: a tervezés rendelésállományból indul.")
@@ -2568,7 +2575,7 @@ with tabs[6]:
     st.markdown("### 5. Export")
     excel_bytes = build_excel_report(filtered, pair, assignment, plan_df, worker_plan, orders_df, fulfillment_df, capacity_df, impact_df)
     st.download_button(
-        "⬇️ V10.5.4.3.2 Excel riport letöltése",
+        "⬇️ V10.6.4.3.2 Excel riport letöltése",
         data=excel_bytes,
         file_name="gyartasi_diagnosztika_v10_riport.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2587,7 +2594,7 @@ with tabs[6]:
 # ------------------------------------------------------------
 with tabs[7]:
     st.subheader("Digital Production Advisor")
-    st.caption("V10.5.4.3.2: vezetői egészségpont, akciólista, dolgozó-gép hőtérkép és mi történik ha szimuláció.")
+    st.caption("V10.6.4.3.2: vezetői egészségpont, akciólista, dolgozó-gép hőtérkép és mi történik ha szimuláció.")
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
